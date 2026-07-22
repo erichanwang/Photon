@@ -12,13 +12,17 @@ public:
     Vector3D color;
     double intensity;
     bool directional;
+    // 0 = point light (unchanged behavior). Above 0, `position` is the center
+    // of an emissive sphere of this radius, sampled per shadow ray for soft
+    // shadows / penumbra instead of a single hard-edged occlusion test.
+    double radius;
 
     Light()
-        : position(0, 10, 0), color(1, 1, 1), intensity(1.0), directional(false) {}
+        : position(0, 10, 0), color(1, 1, 1), intensity(1.0), directional(false), radius(0.0) {}
 
     Light(const Vector3D& pos, const Vector3D& col = Vector3D(1, 1, 1),
-          double intens = 1.0, bool dir = false)
-        : position(pos), color(col), intensity(intens), directional(dir) {}
+          double intens = 1.0, bool dir = false, double rad = 0.0)
+        : position(pos), color(col), intensity(intens), directional(dir), radius(rad) {}
 
     static Light sun(const Vector3D& direction, double intens = 1.0,
                      const Vector3D& col = Vector3D(1, 1, 1)) {

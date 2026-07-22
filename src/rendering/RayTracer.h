@@ -21,6 +21,10 @@ public:
     int maxDepth = 4;            // reflection bounces; 0 disables reflection
     int samplesPerPixel = 1;     // >1 enables jittered supersampling
     int threadCount = 0;         // 0 = hardware_concurrency, 1 = single-threaded
+    // Shadow rays per light per shading sample. Only matters for lights with
+    // radius > 0 (area lights); point/directional lights always use a single
+    // ray, so this is a no-op cost-wise until an area light is in the scene.
+    int shadowSamples = 1;
     Vector3D ambient = Vector3D(0.1, 0.1, 0.1);
 
     // Total primary + shadow + reflection rays cast by the last render().
@@ -77,7 +81,11 @@ public:
         return r0 + (1.0 - r0) * std::pow(1.0 - cosi, 5.0);
     }
 
-    Vector3D trace(const Ray& ray, int depth) const {
+    // px, py, s identify the pixel and antialiasing sample this ray belongs
+    // to. They default to 0 so every pre-existing call site (tests calling
+    // trace() directly) is unaffected; renderPixel() below passes the real
+    // coordinates so area-light sampling stays deterministic per pixel.
+    Vector3D trace(const Ray& ray, int depth, int px = 0, int py = 0, int s = 0) const {
         localRayCount++;
         HitRecord rec;
         if (!scene->intersect(ray, 0.001, 1e9, rec)) return background(ray);
@@ -89,7 +97,7 @@ public:
         // themselves instead of going black.
         if (scene->lights.empty()) return albedo;
 
-        Vector3D color = shade(ray, rec, albedo);
+        Vector3D color = shade(ray, rec, albedo, px, py, s);
 
         double trans = rec.material.transparency;
         double refl = rec.material.reflectivity;
@@ -102,23 +110,37 @@ public:
             // the stored normal points the wrong way and the two media are
             // swapped. Getting this backwards is what makes a sphere render as
             // a solid blob instead of something you can see through.
+            bool exiting = d.dot(n) > 0.0;
             double etaI = 1.0, etaT = rec.material.refractiveIndex;
-            if (d.dot(n) > 0.0) { std::swap(etaI, etaT); n = -n; }
+            if (exiting) { std::swap(etaI, etaT); n = -n; }
             double cosi = std::min(1.0, -d.dot(n));
 
             Vector3D reflectedDir = d - n * (2.0 * d.dot(n));
-            Vector3D reflectedColor = trace(Ray(rec.point + n * 1e-4, reflectedDir), depth - 1);
+            Vector3D reflectedColor = trace(Ray(rec.point + n * 1e-4, reflectedDir), depth - 1, px, py, s);
 
             Vector3D refractedDir, through;
             if (refract(d, n, etaI / etaT, refractedDir)) {
                 // Offset below the surface: the transmitted ray continues into
                 // the object it just entered.
-                Vector3D refractedColor = trace(Ray(rec.point - n * 1e-4, refractedDir), depth - 1);
+                Vector3D refractedColor = trace(Ray(rec.point - n * 1e-4, refractedDir), depth - 1, px, py, s);
                 double f = schlick(cosi, etaI, etaT);
                 through = refractedColor * (1.0 - f) + reflectedColor * f;
             } else {
                 through = reflectedColor;   // total internal reflection
             }
+
+            // Beer-Lambert: this hit is where the ray leaves the medium it was
+            // traveling through, and rec.t is exactly the distance it covered
+            // inside (the ray was spawned at the entry point). Thicker glass
+            // along the path attenuates more; absorption of 0 leaves `through`
+            // unchanged, matching every material that predates this field.
+            if (exiting) {
+                const Vector3D& a = rec.material.absorption;
+                through = Vector3D(through.x * std::exp(-a.x * rec.t),
+                                    through.y * std::exp(-a.y * rec.t),
+                                    through.z * std::exp(-a.z * rec.t));
+            }
+
             color = color * (1.0 - trans) + through * trans;
         } else if (refl > 0.0 && depth > 0) {
             Vector3D n = rec.normal.normalize();
@@ -127,15 +149,19 @@ public:
             // Offset along the normal, or the reflected ray immediately re-hits
             // the surface it just left and the image self-shadows.
             Ray reflected(rec.point + n * 1e-4, reflectedDir);
-            Vector3D reflectedColor = trace(reflected, depth - 1);
+            Vector3D reflectedColor = trace(reflected, depth - 1, px, py, s);
             color = color * (1.0 - refl) + reflectedColor * refl;
         }
         return color;
     }
 
-    // Blinn-Phong: ambient + Lambertian diffuse + specular highlight, with one
-    // shadow ray per light.
-    Vector3D shade(const Ray& ray, const HitRecord& rec, const Vector3D& albedo) const {
+    // Blinn-Phong: ambient + Lambertian diffuse + specular highlight. Point
+    // and directional lights cast one shadow ray, exactly as before; area
+    // lights (radius > 0) average `shadowSamples` stratified rays across the
+    // emitter's sphere, which is what turns their shadow edges into a
+    // penumbra instead of a hard line.
+    Vector3D shade(const Ray& ray, const HitRecord& rec, const Vector3D& albedo,
+                   int px = 0, int py = 0, int s = 0) const {
         Vector3D n = rec.normal.normalize();
         Vector3D viewDir = -ray.direction.normalize();
         // Two-sided shading: a normal pointing away from the viewer means we
@@ -145,29 +171,62 @@ public:
 
         Vector3D result(albedo.x * ambient.x, albedo.y * ambient.y, albedo.z * ambient.z);
 
-        for (const Light& light : scene->lights) {
-            double distance;
-            Vector3D lightDir = light.directionFrom(rec.point, distance);
+        for (size_t li = 0; li < scene->lights.size(); li++) {
+            const Light& light = scene->lights[li];
 
-            double nDotL = n.dot(lightDir);
-            if (nDotL <= 0.0) continue;   // facing away from the light
+            // Point/directional lights (radius == 0) always take 1 sample, so
+            // this reduces to the exact old single-shadow-ray computation --
+            // same distance, same direction, same energy -- when no area
+            // light is present.
+            int samples = (light.radius > 0.0 && !light.directional && shadowSamples > 1)
+                              ? shadowSamples : 1;
 
-            localRayCount++;
-            if (scene->occluded(rec.point + n * 1e-4, lightDir, distance)) continue;
+            for (int k = 0; k < samples; k++) {
+                Vector3D samplePos = light.position;
+                if (samples > 1) {
+                    // Stratified point on the emitter's sphere, uniform over
+                    // its surface. Seeded from pixel + AA-sample + light +
+                    // stratum only, never a thread id or global counter, so
+                    // threaded and single-threaded renders stay bit-identical.
+                    double u1 = hashToUnit(px * 92821 + py, (int)li * 131 + k, s * 197 + 11);
+                    double u2 = hashToUnit(px, py * 92821 + (int)li * 131 + k, s * 197 + 37);
+                    double z = 1.0 - 2.0 * u1;
+                    double r = std::sqrt(std::max(0.0, 1.0 - z * z));
+                    double phi = 2.0 * M_PI * u2;
+                    Vector3D onSphere(r * std::cos(phi), r * std::sin(phi), z);
+                    samplePos = light.position + onSphere * light.radius;
+                }
 
-            double falloff = light.directional ? 1.0
-                                               : 1.0 / std::max(1.0, distance * distance * 0.05);
-            double energy = light.intensity * falloff;
+                double distance;
+                Vector3D lightDir;
+                if (light.directional) {
+                    lightDir = light.directionFrom(rec.point, distance);
+                } else {
+                    Vector3D toLight = samplePos - rec.point;
+                    distance = toLight.length();
+                    lightDir = toLight.normalize();
+                }
 
-            result += Vector3D(albedo.x * light.color.x * nDotL * energy,
-                               albedo.y * light.color.y * nDotL * energy,
-                               albedo.z * light.color.z * nDotL * energy);
+                double nDotL = n.dot(lightDir);
+                if (nDotL <= 0.0) continue;   // facing away from the light
 
-            if (rec.material.specular > 0.0) {
-                Vector3D halfway = (lightDir + viewDir).normalize();
-                double spec = std::pow(std::max(0.0, n.dot(halfway)), rec.material.shininess);
-                double s = spec * rec.material.specular * energy;
-                result += Vector3D(light.color.x * s, light.color.y * s, light.color.z * s);
+                localRayCount++;
+                if (scene->occluded(rec.point + n * 1e-4, lightDir, distance)) continue;
+
+                double falloff = light.directional ? 1.0
+                                                   : 1.0 / std::max(1.0, distance * distance * 0.05);
+                double energy = light.intensity * falloff / samples;
+
+                result += Vector3D(albedo.x * light.color.x * nDotL * energy,
+                                   albedo.y * light.color.y * nDotL * energy,
+                                   albedo.z * light.color.z * nDotL * energy);
+
+                if (rec.material.specular > 0.0) {
+                    Vector3D halfway = (lightDir + viewDir).normalize();
+                    double spec = std::pow(std::max(0.0, n.dot(halfway)), rec.material.shininess);
+                    double sp = spec * rec.material.specular * energy;
+                    result += Vector3D(light.color.x * sp, light.color.y * sp, light.color.z * sp);
+                }
             }
         }
 
@@ -178,7 +237,9 @@ public:
         if (samplesPerPixel <= 1) {
             double u = double(x) / double(width);
             double v = double(y) / double(height);
-            return trace(camera->getRay(u, v), maxDepth);
+            double lensU = hashToUnit(x, y, 1000);
+            double lensV = hashToUnit(x, y, 1001);
+            return trace(camera->getRay(u, v, lensU, lensV), maxDepth, x, y, 0);
         }
 
         Vector3D sum(0, 0, 0);
@@ -186,11 +247,14 @@ public:
             // Deterministic jitter: a given pixel and sample index always get
             // the same offset, so two renders of one scene are bit-identical
             // and the benchmark measures the renderer rather than the noise.
-            double jx = hashToUnit(x, y, s * 2 + 0);
-            double jy = hashToUnit(x, y, s * 2 + 1);
+            // Same reasoning covers the lens jitter used for depth of field.
+            double jx = hashToUnit(x, y, s * 4 + 0);
+            double jy = hashToUnit(x, y, s * 4 + 1);
+            double lensU = hashToUnit(x, y, s * 4 + 2);
+            double lensV = hashToUnit(x, y, s * 4 + 3);
             double u = (double(x) + jx) / double(width);
             double v = (double(y) + jy) / double(height);
-            sum += trace(camera->getRay(u, v), maxDepth);
+            sum += trace(camera->getRay(u, v, lensU, lensV), maxDepth, x, y, s);
         }
         return sum / double(samplesPerPixel);
     }

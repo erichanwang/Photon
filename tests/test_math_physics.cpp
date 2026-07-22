@@ -406,6 +406,165 @@ static void testGlassTransmitsBackground() {
     std::cout << "testGlassTransmitsBackground passed\n";
 }
 
+// Beer-Lambert: color(r) = wallColor * exp(-k * pathLength(r)) for a ray
+// through the exact center of a dielectric sphere. Using ior = 1.0 makes
+// Schlick's term exactly zero at every crossing (r0 = 0 and normal incidence
+// gives cosi = 1 exactly), which removes reflection mixing from the picture
+// entirely and leaves a clean closed form to check against, rather than one
+// clouded by a Fresnel term this test would otherwise have to approximate.
+static void testBeerLambertAbsorption() {
+    Vector3D absorption(0.5, 0.0, 0.0);   // attenuate only the red channel
+
+    auto renderThroughSphere = [&](double radius) {
+        Scene scene;
+        Material glass = Material::dielectric(Vector3D(1, 1, 1), 1.0, 1.0, absorption);
+        Sphere* s = new Sphere(Vector3D(0, 0, -3), radius, glass);
+        Sphere* wall = new Sphere(Vector3D(0, 0, -20), 5.0, Material(Vector3D(1, 1, 1)));
+        scene.addObject(s);
+        scene.addObject(wall);
+        scene.addLight(Light(Vector3D(0, 5, 0), Vector3D(1, 1, 1), 1.0));
+        scene.buildAcceleration();
+
+        Camera camera(Vector3D(0, 0, 0), -M_PI / 2, 0.0f, 60, 1.0);
+        RayTracer tracer(&scene, &camera);
+        tracer.maxDepth = 6;
+        Vector3D c = tracer.trace(Ray(Vector3D(0, 0, 0), Vector3D(0, 0, -1)), 6);
+
+        delete s;
+        delete wall;
+        return c;
+    };
+
+    double r1 = 0.3, r2 = 1.2;
+    Vector3D c1 = renderThroughSphere(r1);
+    Vector3D c2 = renderThroughSphere(r2);
+
+    // The wall-hit point, its shading, and the sky-reflection term are all
+    // identical between the two radii (the ray is undeviated at ior = 1.0 and
+    // always on-axis), so the epsilon surface offsets cancel in the ratio and
+    // what remains is exactly exp(-k * (2*r2 - 2*r1)).
+    double expectedRatio = std::exp(-absorption.x * (2.0 * r2 - 2.0 * r1));
+    double actualRatio = c2.x / c1.x;
+    assert(std::fabs(actualRatio - expectedRatio) < 1e-9);
+
+    // Green and blue carry no absorption coefficient, so radius must not
+    // affect them at all.
+    assert(approxEq(c1.y, c2.y, 1e-9));
+    assert(approxEq(c1.z, c2.z, 1e-9));
+    assert(c1.y > 1e-6);   // sanity: the wall is actually visible through the glass
+
+    std::cout << "testBeerLambertAbsorption passed (ratio " << actualRatio
+              << " vs expected " << expectedRatio << ")\n";
+}
+
+// An area light must widen a shadow's edge into a penumbra: points near the
+// occluder's shadow boundary should see a fraction of the emitter rather than
+// the point light's hard 0-or-1 cutoff.
+//
+// The comparison has to be made against the SAME point with the occluder
+// removed, not against some distant "obviously lit" point. Distance falloff
+// and the Lambertian cosine both vary across the floor, so a far-off sample
+// can easily be dimmer than a partially shadowed one near the light: at
+// x=6 this scene shades to 0.46 while the penumbra at x=2 shades to 0.54.
+// Comparing those two directly measures falloff, not shadowing.
+static void testSoftShadowPenumbra() {
+    Material floorMat(Vector3D(0.8, 0.8, 0.8));
+
+    // Shade one floor point, optionally with the blocker present. Everything
+    // else about the two scenes is identical, so any difference is shadowing.
+    auto shadeAt = [&](double x, bool withBlocker) {
+        Scene scene;
+        Sphere* floor = new Sphere(Vector3D(0, -1000, 0), 1000.0, floorMat);
+        scene.addObject(floor);
+        if (withBlocker)
+            scene.addObject(new Sphere(Vector3D(0, 3, 0), 1.0, Material(Vector3D(1, 1, 1))));
+        scene.addLight(Light(Vector3D(0, 8, 0), Vector3D(1, 1, 1), 3.0, false, 2.0));
+        scene.buildAcceleration();
+
+        Camera camera(Vector3D(0, 5, 10), -M_PI / 2, -0.2f, 60, 1.0);
+        RayTracer tracer(&scene, &camera);
+        tracer.shadowSamples = 256;   // converge the average tightly
+
+        HitRecord rec;
+        rec.point = Vector3D(x, -0.0001, 0);
+        rec.normal = Vector3D(0, 1, 0);
+        rec.material = floorMat;
+        Ray dummy(Vector3D(x, 10, 0), Vector3D(0, -1, 0));
+        Vector3D c = tracer.shade(dummy, rec, floorMat.color, 0, 0, 0);
+
+        for (Object* o : scene.objects) delete o;
+        return c;
+    };
+
+    // Directly under the blocker: every point on the emitter is occluded, so
+    // this is ambient-only.
+    double umbra = shadeAt(0.0, true).x;
+    // Partway out: part of the emitter is visible.
+    double penumbra = shadeAt(2.0, true).x;
+    // The identical point with nothing in the way.
+    double unoccluded = shadeAt(2.0, false).x;
+
+    assert(unoccluded > umbra + 0.1);
+    // Strictly between the two extremes is the whole point: a hard point-light
+    // shadow can only ever produce one or the other.
+    assert(penumbra > umbra + 0.02);
+    assert(penumbra < unoccluded - 0.02);
+
+    // And the penumbra must actually be a gradient, not one intermediate step.
+    double a = shadeAt(1.0, true).x, b = shadeAt(1.5, true).x;
+    assert(a > umbra && b > a && penumbra > b);
+
+    std::cout << "testSoftShadowPenumbra passed (umbra " << umbra << ", penumbra "
+              << penumbra << ", unoccluded " << unoccluded << ")\n";
+}
+
+// Depth of field: at aperture > 0, only rays aimed at focusDistance should be
+// unaffected by lens position; anything jittered off that exact ray direction
+// must land somewhere else on the focal plane, which is precisely what
+// produces blur for out-of-focus geometry. This checks the geometry directly
+// rather than by eyeballing a render.
+static void testDepthOfFieldFocusPlane() {
+    Camera camera(Vector3D(0, 0, 0), -M_PI / 2, 0.0f, 60, 1.0);
+    camera.aperture = 0.5;
+    camera.focusDistance = 10.0;
+
+    // The pinhole ray for this pixel, and the point it reaches on the focal
+    // plane. Every lens sample for the same pixel must pass through exactly
+    // that point - that is what "in focus at focusDistance" means.
+    Camera pinholeRef(Vector3D(0, 0, 0), -M_PI / 2, 0.0f, 60, 1.0);
+    Ray centre = pinholeRef.getRay(0.5, 0.5);
+    Vector3D focusPoint = centre.origin + centre.direction * camera.focusDistance;
+
+    // Two different lens samples for the same pixel (u,v).
+    Ray a = camera.getRay(0.5, 0.5, 0.2, 0.7);
+    Ray b = camera.getRay(0.5, 0.5, 0.8, 0.1);
+
+    // They must leave from different points on the lens...
+    assert((a.origin - b.origin).length() > 1e-6);
+
+    // ...and both must point straight at the focus point. Checking
+    // "origin + direction * focusDistance" instead would be wrong: an origin
+    // offset sideways on the lens is further from the focus point than
+    // focusDistance, so that lands short of the focal plane.
+    assert(((focusPoint - a.origin).normalize() - a.direction).length() < 1e-9);
+    assert(((focusPoint - b.origin).normalize() - b.direction).length() < 1e-9);
+
+    // The lens offset must stay within the aperture.
+    assert((a.origin - centre.origin).length() <= camera.aperture + 1e-9);
+    assert((b.origin - centre.origin).length() <= camera.aperture + 1e-9);
+
+    // Aperture <= 0 must reproduce the exact pinhole ray regardless of the
+    // lens jitter passed in, so every old call site is untouched.
+    Camera pinhole(Vector3D(1, 2, 3), 0.3f, -0.1f, 70, 1.5);
+    Ray p1 = pinhole.getRay(0.4, 0.6);
+    Ray p2 = pinhole.getRay(0.4, 0.6, 0.9, 0.9);
+    assert(approxEq(p1.origin.x, p2.origin.x) && approxEq(p1.direction.x, p2.direction.x));
+    assert(approxEq(p1.origin.y, p2.origin.y) && approxEq(p1.direction.y, p2.direction.y));
+    assert(approxEq(p1.origin.z, p2.origin.z) && approxEq(p1.direction.z, p2.direction.z));
+
+    std::cout << "testDepthOfFieldFocusPlane passed\n";
+}
+
 // Drives Player through a scripted input sequence exactly the way the
 // headless control-loop demo does, proving move()/jump() are reachable
 // through real per-frame input rather than only callable directly in a test.
@@ -476,6 +635,9 @@ int main() {
     testShadowRay();
     testRefraction();
     testGlassTransmitsBackground();
+    testBeerLambertAbsorption();
+    testSoftShadowPenumbra();
+    testDepthOfFieldFocusPlane();
     testControlLoop();
     std::cout << "All tests passed.\n";
     return 0;
