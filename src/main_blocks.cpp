@@ -26,8 +26,8 @@ int main() {
         scene.physics.addBody(rb);
     }
 
-    // Camera
-    Camera camera(Vector3D(0, 2, 10), 0, 0, 90, 16.0/9.0);
+    // Camera: yaw=-pi/2 faces -Z (toward the blocks at z=0), pitch tilts up to frame them.
+    Camera camera(Vector3D(0, 2, 10), -M_PI / 2, 0.46f, 90, 16.0/9.0);
 
     // RayTracer
     RayTracer rayTracer(&scene, &camera);

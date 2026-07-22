@@ -21,7 +21,8 @@ int main() {
 
     // Set up player and camera
     Player player;
-    Camera camera(player.position + Vector3D(0, 1.8, 0), 0, 0, 90, 16.0 / 9.0);
+    // yaw=-pi/2 faces -Z (toward the sphere at z=-5); pitch tilts down slightly to frame it.
+    Camera camera(player.position + Vector3D(0, 1.8, 0), -M_PI / 2, -0.3f, 90, 16.0 / 9.0);
 
     // Set up ray tracer
     RayTracer tracer(&scene, &camera);
