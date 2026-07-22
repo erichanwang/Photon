@@ -12,6 +12,8 @@
 #include "../src/rendering/Scene.h"
 #include "../src/rendering/Camera.h"
 #include "../src/rendering/RayTracer.h"
+#include "../src/physics/Player.h"
+#include "../src/physics/InputDriver.h"
 #include <vector>
 
 static bool approxEq(double a, double b, double eps = 1e-6) {
@@ -303,6 +305,64 @@ static void testShadowRay() {
     std::cout << "testShadowRay passed\n";
 }
 
+// Drives Player through a scripted input sequence exactly the way the
+// headless control-loop demo does, proving move()/jump() are reachable
+// through real per-frame input rather than only callable directly in a test.
+static void testControlLoop() {
+    Player player;
+    const float yaw = -static_cast<float>(M_PI) / 2.0f;   // world-forward = -Z
+    const float dt = 0.05f;
+
+    // Player spawns above the ground (y=1.8, onGround=false), so the first
+    // frames are plain free-fall before landing -- confirm that lands cleanly
+    // and never sinks below the ground.
+    double minY = player.position.y;
+    int stepsToLand = 0;
+    while (!player.onGround && stepsToLand < 200) {
+        player.applyInput(InputState{}, dt, yaw);
+        minY = std::min(minY, player.position.y);
+        stepsToLand++;
+    }
+    assert(player.onGround);
+    assert(approxEq(player.position.y, 0.0, 1e-9));
+    assert(minY >= -1e-9);   // never fell through the ground
+
+    // Movement input translates position: walk forward for a few frames.
+    double zBefore = player.position.z;
+    ScriptedInputDriver walkDriver(std::vector<InputState>(10, [] {
+        InputState in; in.moveForward = 1.0; return in;
+    }()));
+    while (!walkDriver.exhausted()) {
+        player.applyInput(walkDriver.poll(), dt, yaw);
+        assert(player.position.y >= -1e-9);   // still resting on the ground
+    }
+    assert(player.position.z < zBefore - 1e-6);   // moved toward -Z (forward)
+    assert(player.onGround);
+
+    // Jump: leaves the ground, then gravity returns it exactly to y=0.
+    InputState jumpInput;
+    jumpInput.jump = true;
+    player.applyInput(jumpInput, dt, yaw);
+    assert(!player.onGround);
+    assert(player.position.y > 0.0);
+    assert(player.velocity.y > 0.0);
+
+    int stepsToReland = 0;
+    minY = player.position.y;
+    while (!player.onGround && stepsToReland < 200) {
+        player.applyInput(InputState{}, dt, yaw);
+        minY = std::min(minY, player.position.y);
+        stepsToReland++;
+    }
+    assert(player.onGround);
+    assert(approxEq(player.position.y, 0.0, 1e-9));
+    assert(approxEq(player.velocity.y, 0.0, 1e-9));
+    assert(minY >= -1e-9);   // never sank through the ground on the way down
+
+    std::cout << "testControlLoop passed (landed after " << stepsToLand
+              << " steps, jump re-landed after " << stepsToReland << " steps)\n";
+}
+
 int main() {
     testVector3D();
     testRaySphereIntersection();
@@ -313,6 +373,7 @@ int main() {
     testSphereCollisionConservesMomentum();
     testThreadedRenderMatchesSingleThreaded();
     testShadowRay();
+    testControlLoop();
     std::cout << "All tests passed.\n";
     return 0;
 }

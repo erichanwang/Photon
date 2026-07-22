@@ -27,14 +27,25 @@ intersection with a bounding volume hierarchy across a thread pool.
   under gravity and drag using semi-implicit Euler stepping. `PhysicsEngine`
   advances every body and resolves collisions: a ground plane plus
   impulse-based sphere-sphere response with positional correction split by
-  inverse mass. `Player` layers movement and jumping on top of a rigid body.
+  inverse mass. `Player` layers movement, jumping, and gravity on top of that.
+- **Control loop** (`src/physics/InputState.h`, `InputDriver.h`): `InputState`
+  is a plain struct of movement axes, a jump flag, and look deltas, with no
+  dependency on any windowing library. `Player::applyInput()` turns one
+  `InputState` plus a timestep into a real per-frame control loop: jump, move,
+  integrate gravity, land. `ScriptedInputDriver` feeds it a recorded sequence
+  of frames headlessly; `RaylibInputDriver` (guarded behind
+  `#ifdef PHOTON_USE_RAYLIB`) shows the real-keyboard wiring but is not
+  compiled by any target here, since no raylib library is installed. See
+  Known limitations for exactly what that does and doesn't prove.
 - **Objects** (`src/objects`): `Sphere`, `Block`, `Plane`, `Slope`, and
   `Parachute`, each implementing ray intersection and a bounding box against
   the shared `Object` interface.
 - **Math** (`src/math`): `Vector3D`, `Ray`, and `AABB`.
-- Three demo scenes: `main.cpp` (shading, shadows, reflections, 4x AA),
-  `main_blocks.cpp`, and `main_parachutes.cpp` (both animated, with
-  collisions).
+- Four demo scenes: `main.cpp` (shading, shadows, reflections, 4x AA),
+  `main_blocks.cpp` and `main_parachutes.cpp` (both animated, with
+  collisions), and `main_control_demo.cpp` (drives `Player` through a
+  scripted `InputState` sequence — walk, jump, land — rendering one frame per
+  input frame, to prove the control loop is real and not dead code).
 
 ## Building
 
@@ -43,9 +54,9 @@ cmake -B build
 cmake --build build
 ```
 
-This produces five targets: `GameEngine`, `Blocks`, `Parachutes`, `Tests`,
-and `Benchmark`. Without CMake, each compiles directly, since none of them
-depend on anything outside this repo:
+This produces six targets: `GameEngine`, `Blocks`, `Parachutes`, `Tests`,
+`Benchmark`, and `ControlDemo`. Without CMake, each compiles directly, since
+none of them depend on anything outside this repo:
 
 ```sh
 g++ -std=c++17 -O2 -pthread src/main.cpp -o build/GameEngine
@@ -88,6 +99,10 @@ analytic terminal-velocity bound, and:
   loop shows up here as a mismatched pixel.
 - **Shadow rays.** A point behind an occluder is shadowed; a point beside it
   is not.
+- **Control loop.** A scripted `InputState` sequence drives `Player` through
+  `applyInput()`: it falls and lands on spawn without sinking through the
+  ground, walking input translates position, jumping leaves the ground, and
+  gravity brings it back to rest at `y=0` afterward.
 
 ## Benchmarks
 
@@ -130,10 +145,33 @@ once per worker.
 
 ## Known limitations
 
-There is no interactive control loop. `Player::move()` and `Player::jump()`
-exist and are unit-tested, but nothing reads a keyboard: that needs raylib
-linked, and only the bundled `raylib.h` header is present here. The demo
-scenes render to PPM files rather than a window.
+The control loop itself is real and tested, but nothing here reads a real
+keyboard, because raylib is not available in this environment: only the
+bundled `raylib.h` header is present, no library is installed, and
+`pkg-config --exists raylib` fails (confirmed; `apt-get install libraylib-dev`
+also fails here for lack of sudo). To keep `Player::move()`/`jump()` genuinely
+reachable rather than dead code without that dependency, the control loop was
+split from any input source:
+
+- `InputState` (`src/physics/InputState.h`) is a plain struct — movement
+  axes, jump flag, look deltas — with no windowing dependency.
+- `Player::applyInput()` (`src/physics/Player.h`) is the actual control loop:
+  jump, move, integrate gravity, land. This is exercised end to end, headlessly:
+  `tests/test_math_physics.cpp`'s `testControlLoop` asserts landing, walking,
+  jumping, and re-landing against real trajectories, and `ControlDemo`
+  (`src/main_control_demo.cpp`) drives the same loop through 30 scripted
+  frames and ray-traces each one, so the player's motion is visible in the
+  rendered output, not just in printed numbers.
+- `ScriptedInputDriver` (`src/physics/InputDriver.h`) is what feeds both of
+  those a recorded sequence of frames.
+- `RaylibInputDriver`, in the same file, is written to show the intended
+  wiring to real keyboard/mouse input, guarded behind
+  `#ifdef PHOTON_USE_RAYLIB` so it compiles into nothing by default. It has
+  never been compiled or run in this environment — there is no way to verify
+  it without a raylib library to link, and no interactive window can be
+  confirmed here (no display/X server either). Getting from here to a
+  playable build is linking raylib and passing `-DPHOTON_USE_RAYLIB`; no
+  other code changes are expected to be needed.
 
 Collision treats every body as a sphere, so blocks resolve against their
 bounding sphere rather than their faces and will not come to rest on a corner
