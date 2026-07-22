@@ -15,6 +15,7 @@
 #include "rendering/Scene.h"
 #include "rendering/RayTracer.h"
 #include "rendering/Camera.h"
+#include "rendering/Texture.h"
 #include "objects/Sphere.h"
 #include "objects/Plane.h"
 #include "physics/Player.h"
@@ -23,9 +24,7 @@
 int main() {
     Scene scene;
     Material groundMat;
-    groundMat.isGrid = true;
-    groundMat.gridColor1 = Vector3D(0.8, 0.8, 0.8);
-    groundMat.gridColor2 = Vector3D(0.2, 0.2, 0.2);
+    groundMat.texture = new CheckerTexture(Vector3D(0.8, 0.8, 0.8), Vector3D(0.2, 0.2, 0.2), 1.0);
     scene.addObject(new Plane(Vector3D(0, 0, 0), Vector3D(0, 1, 0), groundMat));
     scene.addObject(new Sphere(Vector3D(0, 1, -8), 1.0, Material(Vector3D(0.8, 0.3, 0.3))));
     scene.addLight(Light(Vector3D(4, 8, 1), Vector3D(1.0, 0.95, 0.9), 1.5));

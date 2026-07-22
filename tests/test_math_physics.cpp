@@ -14,7 +14,11 @@
 #include "../src/rendering/RayTracer.h"
 #include "../src/physics/Player.h"
 #include "../src/physics/InputDriver.h"
+#include "../src/objects/Block.h"
+#include "../src/rendering/Texture.h"
 #include <vector>
+#include <fstream>
+#include <cstdio>
 
 static bool approxEq(double a, double b, double eps = 1e-6) {
     return std::fabs(a - b) < eps;
@@ -74,6 +78,105 @@ static void testRaySphereIntersection() {
     assert(!sphere.intersect(sideRay, 0.001, 1e9, rec3));
 
     std::cout << "testRaySphereIntersection passed\n";
+}
+
+// Sphere UV against closed-form values at the poles and four equator points,
+// where u = 0.5 + atan2(z,x)/(2pi), v = 0.5 + asin(y)/pi is exactly computable
+// -- no need to eyeball a render to know the mapping is right.
+static void testSphereUVMapping() {
+    Sphere sphere(Vector3D(0, 0, 0), 2.0, Material(Vector3D(1, 1, 1)));
+    HitRecord rec;
+
+    auto uvAt = [&](const Vector3D& origin, const Vector3D& dir) {
+        HitRecord r;
+        bool hit = sphere.intersect(Ray(origin, dir), 0.001, 1e9, r);
+        assert(hit);
+        return r;
+    };
+
+    rec = uvAt(Vector3D(0, 10, 0), Vector3D(0, -1, 0));   // north pole
+    assert(approxEq(rec.v, 1.0, 1e-9));
+    assert(approxEq(rec.u, 0.5, 1e-9));
+
+    rec = uvAt(Vector3D(0, -10, 0), Vector3D(0, 1, 0));   // south pole
+    assert(approxEq(rec.v, 0.0, 1e-9));
+
+    rec = uvAt(Vector3D(10, 0, 0), Vector3D(-1, 0, 0));   // equator, +x
+    assert(approxEq(rec.u, 0.5, 1e-9));
+    assert(approxEq(rec.v, 0.5, 1e-9));
+
+    rec = uvAt(Vector3D(-10, 0, 0), Vector3D(1, 0, 0));   // equator, -x
+    assert(approxEq(rec.u, 1.0, 1e-9));
+
+    rec = uvAt(Vector3D(0, 0, 10), Vector3D(0, 0, -1));   // equator, +z
+    assert(approxEq(rec.u, 0.75, 1e-9));
+
+    rec = uvAt(Vector3D(0, 0, -10), Vector3D(0, 0, 1));   // equator, -z
+    assert(approxEq(rec.u, 0.25, 1e-9));
+
+    std::cout << "testSphereUVMapping passed\n";
+}
+
+// Plane UV feeds a CheckerTexture the same way the old isGrid/gridSize fields
+// fed the ad-hoc floor(point/gridSize) formula. This checks the migration
+// keeps the exact same checker phase for the axis-aligned ground plane, the
+// only case the old code supported.
+static void testPlaneCheckerMatchesOldGridFormula() {
+    Plane plane(Vector3D(0, 0, 0), Vector3D(0, 1, 0), Material(Vector3D(0, 0, 0)));
+    CheckerTexture checker(Vector3D(1, 1, 1), Vector3D(0, 0, 0), 1.0);
+
+    double xs[] = {0.3, -0.3, 1.7, -1.7, 2.0, -2.0, 0.999, -0.001};
+    double zs[] = {0.3, -0.3, 0.6, -0.6, 1.0, -1.0, 2.999, -2.001};
+    for (double x : xs) {
+        for (double z : zs) {
+            HitRecord rec;
+            bool hit = plane.intersect(Ray(Vector3D(x, 5, z), Vector3D(0, -1, 0)), 0.001, 1e9, rec);
+            assert(hit);
+            int ix = (int)std::floor(x / 1.0);
+            int iz = (int)std::floor(z / 1.0);
+            Vector3D expected = ((ix + iz) % 2 + 2) % 2 == 0 ? Vector3D(1, 1, 1) : Vector3D(0, 0, 0);
+            Vector3D actual = checker.sample(rec.u, rec.v);
+            assert(approxEq(actual.x, expected.x, 1e-9));
+        }
+    }
+
+    std::cout << "testPlaneCheckerMatchesOldGridFormula passed\n";
+}
+
+// Hand-computed bilinear filtering over a 2x2 image:
+//   (0,0)=red (1,1,0,0)  (1,0)=green (0,1,0)
+//   (0,1)=blue (0,0,1)   (1,1)=yellow (1,1,0)
+// (row-major, top row first, matching the PPM's storage order).
+static void testBilinearImageTexture() {
+    const char* path = "build/test_texture_fixture.ppm";
+    {
+        std::ofstream f(path);
+        f << "P3\n2 2\n255\n";
+        f << "255 0 0\n" << "0 255 0\n";
+        f << "0 0 255\n" << "255 255 0\n";
+    }
+
+    ImageTexture tex(path);
+
+    // Dead center of the image: equally weighted average of all four texels.
+    Vector3D center = tex.sample(0.5, 0.5);
+    assert(approxEq(center.x, 0.5, 1e-9));
+    assert(approxEq(center.y, 0.5, 1e-9));
+    assert(approxEq(center.z, 0.25, 1e-9));
+
+    // u=0.5, v=0.75: exactly between the top-row texel centers (red, green),
+    // no vertical blend (ty=0), so a pure 50/50 horizontal interpolation.
+    Vector3D midTopRow = tex.sample(0.5, 0.75);
+    assert(approxEq(midTopRow.x, 0.5, 1e-9));
+    assert(approxEq(midTopRow.y, 0.5, 1e-9));
+    assert(approxEq(midTopRow.z, 0.0, 1e-9));
+
+    // Exact texel centers should reproduce that texel's color exactly.
+    Vector3D topLeft = tex.sample(0.25, 0.75);
+    assert(approxEq(topLeft.x, 1.0, 1e-9) && approxEq(topLeft.y, 0.0, 1e-9) && approxEq(topLeft.z, 0.0, 1e-9));
+
+    std::remove(path);
+    std::cout << "testBilinearImageTexture passed\n";
 }
 
 static void testRigidBodyFreefall() {
@@ -626,6 +729,9 @@ static void testControlLoop() {
 int main() {
     testVector3D();
     testRaySphereIntersection();
+    testSphereUVMapping();
+    testPlaneCheckerMatchesOldGridFormula();
+    testBilinearImageTexture();
     testRigidBodyFreefall();
     testRigidBodyDrag();
     testBVHMatchesLinearScan();
