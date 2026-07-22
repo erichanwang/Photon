@@ -21,6 +21,11 @@ int main() {
     chromeMat.shininess = 128.0;
     chromeMat.reflectivity = 0.6;
     scene.addObject(new Sphere(Vector3D(2.2, 1.2, -6.5), 1.0, chromeMat));
+    // Glass, in front of the checkered ground so the refraction is obvious:
+    // the pattern behind it inverts through the sphere.
+    scene.addObject(new Sphere(Vector3D(-2.0, 1.3, -4.0), 1.1,
+                               Material::dielectric(Vector3D(1.0, 1.0, 1.0), 1.5)));
+
     Material groundMat;
     groundMat.isGrid = true;
     groundMat.gridColor1 = Vector3D(0.8, 0.8, 0.8);

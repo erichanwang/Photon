@@ -305,6 +305,102 @@ static void testShadowRay() {
     std::cout << "testShadowRay passed\n";
 }
 
+// Refraction is checked against Snell's law directly rather than by eyeballing
+// a render: a bent ray that merely looks plausible is exactly the kind of bug
+// that survives to ship.
+static void testRefraction() {
+    const Vector3D n(0, 1, 0);
+
+    // Air into glass at 45 degrees. Snell gives
+    // sin(t) = sin(45)/1.5, so t = asin(0.7071/1.5) = 28.13 degrees.
+    double inc = M_PI / 4.0;
+    Vector3D d = Vector3D(std::sin(inc), -std::cos(inc), 0).normalize();
+    Vector3D out;
+    assert(RayTracer::refract(d, n, 1.0 / 1.5, out));
+
+    double expected = std::asin(std::sin(inc) / 1.5);
+    double actual = std::acos(std::min(1.0, -out.normalize().dot(n)));
+    assert(std::fabs(actual - expected) < 1e-9);
+
+    // Bending is toward the normal on the way in, so the outgoing angle is the
+    // smaller one. This catches an inverted eta, which still produces a
+    // unit-length direction and so passes any "is it NaN" check.
+    assert(actual < inc);
+    assert(std::fabs(out.length() - 1.0) < 1e-9);
+
+    // Straight-on rays pass through undeviated at any index.
+    Vector3D straight;
+    assert(RayTracer::refract(Vector3D(0, -1, 0), n, 1.0 / 1.5, straight));
+    assert(std::fabs(straight.x) < 1e-12 && std::fabs(straight.z) < 1e-12);
+
+    // Glass into air past the critical angle, asin(1/1.5) = 41.8 degrees:
+    // there is no transmitted ray, and refract() must say so rather than
+    // return a NaN direction from the square root of a negative.
+    double critical = std::asin(1.0 / 1.5);
+    Vector3D steep = Vector3D(std::sin(critical + 0.05), -std::cos(critical + 0.05), 0).normalize();
+    Vector3D none;
+    assert(!RayTracer::refract(steep, n, 1.5 / 1.0, none));
+
+    // Just inside the critical angle it must still transmit, so the boundary
+    // is where physics puts it and not a few degrees off.
+    Vector3D shallow = Vector3D(std::sin(critical - 0.05), -std::cos(critical - 0.05), 0).normalize();
+    assert(RayTracer::refract(shallow, n, 1.5 / 1.0, none));
+
+    // Fresnel: glass reflects little head-on and almost everything at a
+    // grazing angle. Roughly 4% at normal incidence for an index of 1.5.
+    assert(std::fabs(RayTracer::schlick(1.0, 1.0, 1.5) - 0.04) < 0.005);
+    assert(RayTracer::schlick(0.0, 1.0, 1.5) > 0.99);
+    assert(RayTracer::schlick(0.5, 1.0, 1.5) > RayTracer::schlick(1.0, 1.0, 1.5));
+
+    std::cout << "testRefraction passed\n";
+}
+
+// A glass sphere must actually transmit what is behind it. Rendering the same
+// scene with the sphere opaque and then transparent has to differ, or the
+// refraction path is silently dead code.
+static void testGlassTransmitsBackground() {
+    Material opaque(Vector3D(0.9, 0.9, 0.9));
+    Material glass = Material::dielectric(Vector3D(1, 1, 1), 1.5);
+
+    auto renderCenterPixel = [](const Material& m) {
+        Scene scene;
+        Sphere* s = new Sphere(Vector3D(0, 0, -3), 1.0, m);
+        // A red wall behind the sphere, visible only by transmission.
+        Sphere* wall = new Sphere(Vector3D(0, 0, -12), 5.0, Material(Vector3D(1.0, 0.0, 0.0)));
+        scene.addObject(s);
+        scene.addObject(wall);
+        scene.addLight(Light(Vector3D(0, 5, 2), Vector3D(1, 1, 1), 1.0));
+        scene.buildAcceleration();
+
+        Camera camera(Vector3D(0, 0, 0), -M_PI / 2, 0.0f, 60, 1.0);
+        RayTracer tracer(&scene, &camera);
+        tracer.maxDepth = 6;
+        Vector3D c = tracer.trace(Ray(Vector3D(0, 0, 0), Vector3D(0, 0, -1)), 6);
+
+        delete s;
+        delete wall;
+        return c;
+    };
+
+    Vector3D opaqueColor = renderCenterPixel(opaque);
+    Vector3D glassColor = renderCenterPixel(glass);
+
+    // The opaque sphere is lit by a white light, so it renders gray: no
+    // channel can pick up the wall behind it.
+    assert(std::fabs(opaqueColor.x - opaqueColor.y) < 1e-6);
+    assert(std::fabs(opaqueColor.x - opaqueColor.z) < 1e-6);
+
+    // The glass sphere is the same white material under the same white light,
+    // so red can only lead here by way of the wall behind it. Comparing hue
+    // rather than brightness matters: transmission tints the pixel, it does
+    // not brighten it, and the glass pixel is in fact the darker of the two.
+    assert(glassColor.x > glassColor.y + 0.1);
+    assert(glassColor.x > glassColor.z + 0.1);
+    assert(glassColor.x > opaqueColor.x - opaqueColor.y + 0.1);
+
+    std::cout << "testGlassTransmitsBackground passed\n";
+}
+
 // Drives Player through a scripted input sequence exactly the way the
 // headless control-loop demo does, proving move()/jump() are reachable
 // through real per-frame input rather than only callable directly in a test.
@@ -373,6 +469,8 @@ int main() {
     testSphereCollisionConservesMomentum();
     testThreadedRenderMatchesSingleThreaded();
     testShadowRay();
+    testRefraction();
+    testGlassTransmitsBackground();
     testControlLoop();
     std::cout << "All tests passed.\n";
     return 0;

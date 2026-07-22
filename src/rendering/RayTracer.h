@@ -55,6 +55,28 @@ public:
         return ((ix + iz) % 2 + 2) % 2 == 0 ? rec.material.gridColor1 : rec.material.gridColor2;
     }
 
+    // Snell's law. 'd' and 'n' must be unit, 'n' facing against 'd', and eta is
+    // the ratio of the incoming medium's index to the outgoing one. Returns
+    // false on total internal reflection, where no transmitted ray exists:
+    // past the critical angle the geometry has no solution, and squaring a
+    // negative here is what produces NaN directions in a naive implementation.
+    static bool refract(const Vector3D& d, const Vector3D& n, double eta, Vector3D& out) {
+        double cosi = -d.dot(n);
+        double k = 1.0 - eta * eta * (1.0 - cosi * cosi);
+        if (k < 0.0) return false;
+        out = d * eta + n * (eta * cosi - std::sqrt(k));
+        return true;
+    }
+
+    // Schlick's approximation of the Fresnel term: how much light reflects off
+    // a dielectric rather than passing through, as a function of view angle.
+    // This is why glass is a window head-on and a mirror at a glancing angle.
+    static double schlick(double cosi, double etaI, double etaT) {
+        double r0 = (etaI - etaT) / (etaI + etaT);
+        r0 *= r0;
+        return r0 + (1.0 - r0) * std::pow(1.0 - cosi, 5.0);
+    }
+
     Vector3D trace(const Ray& ray, int depth) const {
         localRayCount++;
         HitRecord rec;
@@ -69,8 +91,36 @@ public:
 
         Vector3D color = shade(ray, rec, albedo);
 
+        double trans = rec.material.transparency;
         double refl = rec.material.reflectivity;
-        if (refl > 0.0 && depth > 0) {
+
+        if (trans > 0.0 && depth > 0) {
+            Vector3D n = rec.normal.normalize();
+            Vector3D d = ray.direction.normalize();
+
+            // A ray leaving the glass hits the same surface from inside, where
+            // the stored normal points the wrong way and the two media are
+            // swapped. Getting this backwards is what makes a sphere render as
+            // a solid blob instead of something you can see through.
+            double etaI = 1.0, etaT = rec.material.refractiveIndex;
+            if (d.dot(n) > 0.0) { std::swap(etaI, etaT); n = -n; }
+            double cosi = std::min(1.0, -d.dot(n));
+
+            Vector3D reflectedDir = d - n * (2.0 * d.dot(n));
+            Vector3D reflectedColor = trace(Ray(rec.point + n * 1e-4, reflectedDir), depth - 1);
+
+            Vector3D refractedDir, through;
+            if (refract(d, n, etaI / etaT, refractedDir)) {
+                // Offset below the surface: the transmitted ray continues into
+                // the object it just entered.
+                Vector3D refractedColor = trace(Ray(rec.point - n * 1e-4, refractedDir), depth - 1);
+                double f = schlick(cosi, etaI, etaT);
+                through = refractedColor * (1.0 - f) + reflectedColor * f;
+            } else {
+                through = reflectedColor;   // total internal reflection
+            }
+            color = color * (1.0 - trans) + through * trans;
+        } else if (refl > 0.0 && depth > 0) {
             Vector3D n = rec.normal.normalize();
             Vector3D d = ray.direction.normalize();
             Vector3D reflectedDir = d - n * (2.0 * d.dot(n));

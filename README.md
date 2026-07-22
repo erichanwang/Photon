@@ -15,6 +15,12 @@ intersection with a bounding volume hierarchy across a thread pool.
   Lambertian diffuse + Blinn-Phong specular per light, casting a shadow ray
   to each. Reflective materials recurse up to `maxDepth` bounces.
   `samplesPerPixel > 1` enables jittered supersampling for anti-aliasing.
+- **Dielectrics** (`Material::dielectric`): materials with a `transparency`
+  above 0 refract by Snell's law, and the split between the reflected and
+  transmitted ray comes from Schlick's approximation of the Fresnel term, so
+  glass is a window head-on and a mirror at a glancing angle. Past the
+  critical angle there is no transmitted ray at all and the surface reflects
+  totally, which is the bright rim along the bottom edge of a glass sphere.
 - **Acceleration** (`src/rendering/BVH.h`): a bounding volume hierarchy over
   the scene's bounded objects, built by median split along the longest axis
   of the centroid bounds, stored as a flat node array. Objects of infinite
@@ -99,6 +105,14 @@ analytic terminal-velocity bound, and:
   loop shows up here as a mismatched pixel.
 - **Shadow rays.** A point behind an occluder is shadowed; a point beside it
   is not.
+- **Refraction against Snell's law.** A ray entering glass at 45 degrees must
+  leave at `asin(sin(45)/1.5)`, checked to 1e-9 rather than by eyeballing a
+  render. The critical angle is checked from both sides: 0.05 rad inside it
+  still transmits, 0.05 rad past it must report total internal reflection
+  instead of returning a NaN direction from a negative square root. A second
+  test renders a white sphere against a red wall twice, opaque and as glass,
+  and asserts the opaque pixel is gray while the glass pixel is red-dominant
+  - the wall's color can only reach the camera by transmission.
 - **Control loop.** A scripted `InputState` sequence drives `Player` through
   `applyInput()`: it falls and lands on spawn without sinking through the
   ground, walking input translates position, jumping leaves the ground, and
@@ -181,8 +195,11 @@ tens of bodies these demos use.
 The BVH splits at the median rather than by a surface-area heuristic, and is
 rebuilt from scratch each frame in the animated demos rather than refitted.
 `UI.cpp` and `GUI.cpp` are SDL-based and are not compiled by any target while
-SDL2 stays disabled. There is no refraction, despite `Material` carrying a
-`refractiveIndex`.
+SDL2 stays disabled.
+
+Refraction is uniform: there is no wavelength-dependent index, so the renderer
+produces no chromatic dispersion, and no Beer-Lambert absorption, so thick
+glass tints exactly as much as thin glass.
 
 ## License
 
