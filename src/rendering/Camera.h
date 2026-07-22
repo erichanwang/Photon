@@ -47,7 +47,7 @@ public:
     }
 
     Ray getRay(double u, double v) const {
-        Vector3D lower_left = position - right * half_width - up * half_height - direction * focal_length;
+        Vector3D lower_left = position + direction * focal_length - right * half_width - up * half_height;
         Vector3D horizontal = right * 2 * half_width;
         Vector3D vertical = up * 2 * half_height;
         return Ray(position, (lower_left + horizontal * u + vertical * v - position).normalize());
