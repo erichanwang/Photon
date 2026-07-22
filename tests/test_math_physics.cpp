@@ -14,6 +14,9 @@
 #include "../src/rendering/RayTracer.h"
 #include "../src/physics/Player.h"
 #include "../src/physics/InputDriver.h"
+#include "../src/physics/BroadPhase.h"
+#include <random>
+#include <set>
 #include <vector>
 
 static bool approxEq(double a, double b, double eps = 1e-6) {
@@ -623,6 +626,128 @@ static void testControlLoop() {
               << " steps, jump re-landed after " << stepsToReland << " steps)\n";
 }
 
+static void testBoxRestsOnGroundFace() {
+    PhysicsEngine engine;
+    engine.groundY = 0.0;
+
+    RigidBody* box = new RigidBody(Vector3D(0, 10, 0), 2.0);
+    box->shape = RigidBody::Shape::Box;
+    box->halfExtents = Vector3D(1.0, 0.5, 1.5);   // deliberately not a cube
+    box->restitution = 0.3;
+    engine.addBody(box);
+
+    for (int i = 0; i < 2000; ++i) engine.update(0.01);
+
+    assert(approxEq(box->position.y, engine.groundY + box->halfExtents.y, 1e-6));
+    assert(approxEq(box->velocity.y, 0.0, 1e-6));
+
+    delete box;
+    std::cout << "testBoxRestsOnGroundFace passed\n";
+}
+
+// Two boxes stacked must rest at the sum of their half-heights apart, along
+// the face they actually share, not collapse toward each other's centers the
+// way a bounding-sphere resolution would.
+static void testBoxRestsOnBoxFace() {
+    PhysicsEngine engine;
+    engine.groundY = 0.0;
+
+    RigidBody* lower = new RigidBody(Vector3D(0, 0.5, 0), 5.0);
+    lower->shape = RigidBody::Shape::Box;
+    lower->halfExtents = Vector3D(1.0, 0.5, 1.0);
+    lower->isStatic = true;
+    engine.addBody(lower);
+
+    RigidBody* upper = new RigidBody(Vector3D(0, 5, 0), 1.0);
+    upper->shape = RigidBody::Shape::Box;
+    upper->halfExtents = Vector3D(0.5, 0.5, 0.5);
+    upper->restitution = 0.2;
+    engine.addBody(upper);
+
+    engine.hasGround = false;   // isolate box-vs-box from the ground plane
+    for (int i = 0; i < 2000; ++i) engine.update(0.01);
+
+    double expectedY = lower->position.y + lower->halfExtents.y + upper->halfExtents.y;
+    assert(approxEq(upper->position.y, expectedY, 1e-6));
+    assert(approxEq(upper->velocity.y, 0.0, 1e-6));
+
+    delete lower;
+    delete upper;
+    std::cout << "testBoxRestsOnBoxFace passed\n";
+}
+
+// A sphere resting on an off-center point of a wide, flat static box must be
+// pushed out along the box's face normal (straight up), not along the vector
+// from box center to sphere center - the bug real box collision fixes.
+static void testSphereOnBoxUsesFaceNormalNotCenterVector() {
+    PhysicsEngine engine;
+    engine.hasGround = false;
+
+    RigidBody* platform = new RigidBody(Vector3D(0, 0, 0), 1.0);
+    platform->shape = RigidBody::Shape::Box;
+    platform->halfExtents = Vector3D(5.0, 0.5, 5.0);
+    platform->isStatic = true;
+    engine.addBody(platform);
+
+    // Well off to the side of the platform's center, still over its top face.
+    RigidBody* sphere = new RigidBody(Vector3D(4.0, 5.0, 0), 1.0);
+    sphere->radius = 0.5;
+    sphere->restitution = 0.1;
+    engine.addBody(sphere);
+
+    for (int i = 0; i < 2000; ++i) engine.update(0.01);
+
+    // Rests on the top face at platform top (0.5) + sphere radius (0.5) = 1.0,
+    // and must not have drifted sideways off the platform in x or z.
+    assert(approxEq(sphere->position.y, 1.0, 1e-6));
+    assert(approxEq(sphere->position.x, 4.0, 1e-6));
+    assert(approxEq(sphere->position.z, 0.0, 1e-6));
+    assert(approxEq(sphere->velocity.y, 0.0, 1e-6));
+
+    delete platform;
+    delete sphere;
+    std::cout << "testSphereOnBoxUsesFaceNormalNotCenterVector passed\n";
+}
+
+// The property that matters for a broad phase: it must change nothing. Every
+// pair whose bounding spheres actually overlap - what the old O(n^2) loop
+// would have found - must appear in the spatial hash's candidate set. A
+// broad phase that is fast but misses a pair is a tunnelling bug, not an
+// optimization.
+static void testBroadPhaseCoversAllCollidingPairs() {
+    std::mt19937 rng(12345);
+    std::uniform_real_distribution<double> posDist(-15.0, 15.0);
+    std::uniform_real_distribution<double> radDist(0.2, 2.5);
+
+    std::vector<RigidBody*> bodies;
+    const int n = 400;
+    for (int i = 0; i < n; ++i) {
+        RigidBody* b = new RigidBody(Vector3D(posDist(rng), posDist(rng), posDist(rng)), 1.0);
+        b->radius = radDist(rng);
+        bodies.push_back(b);
+    }
+
+    std::set<std::pair<size_t, size_t>> actuallyColliding;
+    for (size_t i = 0; i < bodies.size(); ++i)
+        for (size_t j = i + 1; j < bodies.size(); ++j) {
+            double d = (bodies[j]->position - bodies[i]->position).length();
+            if (d < bodies[i]->boundingRadius() + bodies[j]->boundingRadius())
+                actuallyColliding.insert({i, j});
+        }
+    assert(!actuallyColliding.empty());   // the test is void if nothing overlaps
+
+    SpatialHashBroadPhase broadPhase(2.0);
+    auto candidates = broadPhase.findPairs(bodies);
+    std::set<std::pair<size_t, size_t>> candidateSet(candidates.begin(), candidates.end());
+
+    for (auto& pr : actuallyColliding)
+        assert(candidateSet.count(pr) == 1);
+
+    for (auto b : bodies) delete b;
+    std::cout << "testBroadPhaseCoversAllCollidingPairs passed (" << actuallyColliding.size()
+              << " real pairs among " << candidateSet.size() << " candidates)\n";
+}
+
 int main() {
     testVector3D();
     testRaySphereIntersection();
@@ -639,6 +764,10 @@ int main() {
     testSoftShadowPenumbra();
     testDepthOfFieldFocusPlane();
     testControlLoop();
+    testBoxRestsOnGroundFace();
+    testBoxRestsOnBoxFace();
+    testSphereOnBoxUsesFaceNormalNotCenterVector();
+    testBroadPhaseCoversAllCollidingPairs();
     std::cout << "All tests passed.\n";
     return 0;
 }
