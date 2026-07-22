@@ -24,8 +24,8 @@ public:
     // Build once, then reuse. Physics moves objects between frames, so an
     // animated scene has to rebuild -- hence an explicit call rather than a
     // build hidden inside the first intersect(), which would silently go stale.
-    void buildAcceleration() {
-        bvh.build(objects);
+    void buildAcceleration(BVH::Heuristic heuristic = BVH::Heuristic::SAH) {
+        bvh.build(objects, heuristic);
         unbounded.clear();
         for (Object* o : objects) {
             AABB b;

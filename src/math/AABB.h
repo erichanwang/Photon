@@ -21,6 +21,14 @@ public:
 
     Vector3D centroid() const { return (min + max) * 0.5; }
 
+    // Surface area, for the SAH cost function: cost is proportional to the
+    // probability a random ray through the parent box also passes through a
+    // child, and that probability is the child's area over the parent's.
+    double surfaceArea() const {
+        double dx = max.x - min.x, dy = max.y - min.y, dz = max.z - min.z;
+        return 2.0 * (dx * dy + dy * dz + dz * dx);
+    }
+
     void expand(const AABB& other) {
         min = Vector3D(std::min(min.x, other.min.x),
                        std::min(min.y, other.min.y),

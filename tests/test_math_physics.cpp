@@ -143,7 +143,7 @@ static void testRigidBodyDrag() {
 // changes nothing: for every ray, the accelerated result must equal the
 // exhaustive scan's result exactly. A tree that is fast and subtly wrong is far
 // worse than the linear scan it replaced.
-static void testBVHMatchesLinearScan() {
+static void testBVHMatchesLinearScanFor(BVH::Heuristic heuristic, const char* label) {
     Scene scene;
     for (int i = 0; i < 60; i++) {
         double fx = ((i * 37) % 17) - 8.0;
@@ -157,7 +157,7 @@ static void testBVHMatchesLinearScan() {
     scene.addObject(new Plane(Vector3D(0, -10, 0), Vector3D(0, 1, 0),
                               Material(Vector3D(0.5, 0.5, 0.5))));
 
-    scene.buildAcceleration();
+    scene.buildAcceleration(heuristic);
     assert(!scene.acceleration().empty());
 
     int compared = 0, hits = 0;
@@ -188,8 +188,13 @@ static void testBVHMatchesLinearScan() {
     assert(hits > 100);
 
     for (Object* o : scene.objects) delete o;
-    std::cout << "testBVHMatchesLinearScan passed (" << compared << " rays, "
-              << hits << " hits)\n";
+    std::cout << "testBVHMatchesLinearScan[" << label << "] passed (" << compared
+              << " rays, " << hits << " hits)\n";
+}
+
+static void testBVHMatchesLinearScan() {
+    testBVHMatchesLinearScanFor(BVH::Heuristic::Median, "median");
+    testBVHMatchesLinearScanFor(BVH::Heuristic::SAH, "sah");
 }
 
 static void testGroundCollision() {

@@ -22,10 +22,13 @@ intersection with a bounding volume hierarchy across a thread pool.
   critical angle there is no transmitted ray at all and the surface reflects
   totally, which is the bright rim along the bottom edge of a glass sphere.
 - **Acceleration** (`src/rendering/BVH.h`): a bounding volume hierarchy over
-  the scene's bounded objects, built by median split along the longest axis
-  of the centroid bounds, stored as a flat node array. Objects of infinite
-  extent (an unbounded `Plane`) have no finite box, so `Scene` keeps them on
-  a short linear list and tests both.
+  the scene's bounded objects, stored as a flat node array. `BVH::Heuristic`
+  selects how it splits: `SAH` (the default) bins primitives by centroid on
+  each axis and sweeps for the split that minimizes expected traversal cost,
+  falling back to a median split if no split beats leaving the range as a
+  leaf; `Median` always splits at the middle of the longest axis of the
+  centroid bounds. Objects of infinite extent (an unbounded `Plane`) have no
+  finite box, so `Scene` keeps them on a short linear list and tests both.
 - **Threading**: rows are handed out through an atomic cursor rather than
   split statically, because a row through the middle of the scene casts far
   more shadow and reflection rays than one through empty sky.
@@ -91,9 +94,10 @@ analytic terminal-velocity bound, and:
 
 - **BVH equals linear scan.** 425 rays against a 61-object scene, asserting
   the accelerated hit record is identical to the exhaustive scan's, field by
-  field. The BVH is only an optimization, so the property that matters is
-  that it changes nothing; a tree that is fast and subtly wrong is worse than
-  the scan it replaced.
+  field, for both the median-split and SAH builds independently. The BVH is
+  only an optimization, so the property that matters is that it changes
+  nothing; a tree that is fast and subtly wrong is worse than the scan it
+  replaced.
 - **Ground collision.** A body dropped from 10m settles exactly on the ground
   plane with zero residual velocity, instead of sinking through it.
 - **Momentum conservation.** Two elastic spheres collide head-on; total
@@ -131,24 +135,41 @@ Measured on a 16-core machine, 500 spheres plus an unbounded plane, 400x300,
 
 | Structure | Time | Throughput |
 |---|---|---|
-| Linear scan | 3.345 s | 0.17 Mrays/s |
-| BVH (depth 9, 511 nodes) | 0.405 s | 1.40 Mrays/s |
-| **Speedup** | **8.3x** | |
+| Linear scan | 2.553 s | 0.22 Mrays/s |
+| BVH, SAH (depth 11, 583 nodes) | 0.319 s | 1.77 Mrays/s |
+| **Speedup** | **8.0x** | |
+
+**Median split vs binned SAH, single-threaded:**
+
+| Heuristic | Build time | Depth | Nodes | Render time | Throughput |
+|---|---|---|---|---|---|
+| Median split | 0.0004 s | 9 | 511 | 0.339 s | 1.67 Mrays/s |
+| Binned SAH | 0.0008 s | 11 | 583 | 0.330 s | 1.71 Mrays/s |
+
+On this scene SAH wins, but only barely: about 3% faster traversal for
+roughly 2x the build time, and both are sub-millisecond to build regardless.
+The scene is 500 spheres scattered fairly evenly around a ring, which is
+close to the case median split already handles well; SAH's advantage grows
+on scenes with uneven or clustered object density, where a fixed midpoint
+split leaves lopsided subtrees and SAH's cost search does not. The benchmark
+verifies the two heuristics render bit-identical images before reporting
+either number, so this is a real (if modest) result, not a rounding artifact.
 
 **Thread scaling, with the BVH enabled:**
 
 | Threads | Time | Throughput | Speedup |
 |---|---|---|---|
-| 1 | 0.476 s | 1.19 Mrays/s | 1.0x |
-| 2 | 0.261 s | 2.17 Mrays/s | 1.8x |
-| 4 | 0.169 s | 3.35 Mrays/s | 2.8x |
-| 8 | 0.091 s | 6.25 Mrays/s | 5.3x |
-| 16 | 0.069 s | 8.24 Mrays/s | 6.9x |
+| 1 | 0.320 s | 1.76 Mrays/s | 1.0x |
+| 2 | 0.196 s | 2.89 Mrays/s | 1.6x |
+| 4 | 0.120 s | 4.71 Mrays/s | 2.7x |
+| 8 | 0.080 s | 7.03 Mrays/s | 4.0x |
+| 16 | 0.057 s | 9.89 Mrays/s | 5.6x |
 
 The benchmark verifies that the BVH and the linear scan produce identical
-images, and that every thread count produces the image the single-threaded
-run did, before reporting any timing. A speedup can therefore never come from
-one configuration quietly doing less work.
+images, that the median-split and SAH builds produce identical images to
+each other, and that every thread count produces the image the
+single-threaded run did, before reporting any timing. A speedup can
+therefore never come from one configuration quietly doing less work.
 
 Scaling falls short of linear mainly because this scene renders in under a
 second, so thread startup and the tail of the last few rows are a real
@@ -192,8 +213,8 @@ bounding sphere rather than their faces and will not come to rest on a corner
 realistically. The broad phase is an O(n^2) pair loop, which is fine for the
 tens of bodies these demos use.
 
-The BVH splits at the median rather than by a surface-area heuristic, and is
-rebuilt from scratch each frame in the animated demos rather than refitted.
+The BVH is rebuilt from scratch each frame in the animated demos rather than
+refitted, regardless of which split heuristic is selected.
 `UI.cpp` and `GUI.cpp` are SDL-based and are not compiled by any target while
 SDL2 stays disabled.
 

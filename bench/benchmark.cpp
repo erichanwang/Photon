@@ -116,6 +116,48 @@ int main(int argc, char** argv) {
                 scene.acceleration().nodes.size());
     std::printf("  images identical: yes (%lld rays each)\n", bvhRays);
 
+    // --- median split vs binned SAH: build cost and the tree it produces ---
+    // Build time is measured separately from render time, since a slower
+    // build that produces a faster tree (or vice versa) is a real, reportable
+    // tradeoff, not something to average away.
+    std::printf("\n=== BVH heuristic: median split vs binned SAH ===\n");
+
+    auto buildStart = std::chrono::steady_clock::now();
+    scene.buildAcceleration(BVH::Heuristic::Median);
+    double medianBuildTime = std::chrono::duration<double>(
+        std::chrono::steady_clock::now() - buildStart).count();
+    int medianDepth = scene.acceleration().depth();
+    size_t medianNodes = scene.acceleration().nodes.size();
+
+    std::vector<Vector3D> medianImage;
+    long long medianRays = 0;
+    double medianTime = renderSeconds(scene, camera, 1, medianImage, medianRays);
+
+    buildStart = std::chrono::steady_clock::now();
+    scene.buildAcceleration(BVH::Heuristic::SAH);
+    double sahBuildTime = std::chrono::duration<double>(
+        std::chrono::steady_clock::now() - buildStart).count();
+    int sahDepth = scene.acceleration().depth();
+    size_t sahNodes = scene.acceleration().nodes.size();
+
+    std::vector<Vector3D> sahImage;
+    long long sahRays = 0;
+    double sahTime = renderSeconds(scene, camera, 1, sahImage, sahRays);
+
+    // The whole point of the earlier BVH-vs-linear-scan check: an SAH build
+    // that is faster but returns different hits than the tree it replaced
+    // would be a regression dressed up as a speedup.
+    if (!imagesMatch(medianImage, sahImage)) {
+        std::printf("ABORT: median-split and SAH BVH produced different images\n");
+        return 1;
+    }
+
+    std::printf("  median split : build %7.4f s, depth %2d, %5zu nodes, render %7.3f s (%.2f Mrays/s)\n",
+                medianBuildTime, medianDepth, medianNodes, medianTime, medianRays / medianTime / 1e6);
+    std::printf("  binned SAH   : build %7.4f s, depth %2d, %5zu nodes, render %7.3f s (%.2f Mrays/s)\n",
+                sahBuildTime, sahDepth, sahNodes, sahTime, sahRays / sahTime / 1e6);
+    std::printf("  images identical: yes (%lld rays each)\n", sahRays);
+
     // --- thread scaling, with the BVH on ---
     std::printf("\n=== Thread scaling (BVH enabled) ===\n");
     int hw = (int)std::max(1u, std::thread::hardware_concurrency());
