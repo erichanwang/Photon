@@ -23,8 +23,17 @@ int main() {
         scene.addObject(block);
         // Add physics
         RigidBody* rb = new RigidBody(block->position, 1.0);
+        rb->radius = 0.5;          // the 1x1x1 block's bounding sphere
+        rb->restitution = 0.35;
         scene.physics.addBody(rb);
     }
+
+    // The ground sphere is centered at y = -1001 with radius 1000, so its
+    // surface sits at y = -1. Without this the blocks sank straight through it.
+    scene.physics.groundY = -1.0;
+
+    scene.addLight(Light(Vector3D(6, 12, 8), Vector3D(1.0, 0.95, 0.9), 1.4));
+    scene.addLight(Light::sun(Vector3D(-0.3, -1.0, -0.4), 0.35, Vector3D(0.6, 0.7, 1.0)));
 
     // Camera: yaw=-pi/2 faces -Z (toward the blocks at z=0), pitch tilts up to frame them.
     Camera camera(Vector3D(0, 2, 10), -M_PI / 2, 0.46f, 90, 16.0/9.0);
@@ -49,6 +58,10 @@ int main() {
                 }
             }
         }
+
+        // Objects moved this frame, so the BVH built for the previous one is
+        // stale. Rebuilding is cheap next to the render it accelerates.
+        scene.buildAcceleration();
 
         // Render
         rayTracer.render(scene, camera, width, height, image);

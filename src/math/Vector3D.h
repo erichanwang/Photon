@@ -26,6 +26,13 @@ public:
         return Vector3D(x - v.x, y - v.y, z - v.z);
     }
 
+    Vector3D& operator-=(const Vector3D& v) {
+        x -= v.x;
+        y -= v.y;
+        z -= v.z;
+        return *this;
+    }
+
     Vector3D operator-() const {
         return Vector3D(-x, -y, -z);
     }

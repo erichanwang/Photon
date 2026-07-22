@@ -11,13 +11,26 @@ int main() {
     // Set up scene
     Scene scene;
     Material sphereMat(Vector3D(0.8, 0.3, 0.3));
+    sphereMat.specular = 0.6;
+    sphereMat.shininess = 64.0;
+    sphereMat.reflectivity = 0.3;
     scene.addObject(new Sphere(Vector3D(0, 2, -5), 1.0, sphereMat));
+
+    Material chromeMat(Vector3D(0.35, 0.4, 0.5));
+    chromeMat.specular = 0.9;
+    chromeMat.shininess = 128.0;
+    chromeMat.reflectivity = 0.6;
+    scene.addObject(new Sphere(Vector3D(2.2, 1.2, -6.5), 1.0, chromeMat));
     Material groundMat;
     groundMat.isGrid = true;
     groundMat.gridColor1 = Vector3D(0.8, 0.8, 0.8);
     groundMat.gridColor2 = Vector3D(0.2, 0.2, 0.2);
     groundMat.gridSize = 1.0;
     scene.addObject(new Plane(Vector3D(0, 0, 0), Vector3D(0, 1, 0), groundMat));
+
+    scene.addLight(Light(Vector3D(4, 8, 1), Vector3D(1.0, 0.95, 0.9), 1.5));
+    scene.addLight(Light::sun(Vector3D(-0.5, -1.0, -0.2), 0.4, Vector3D(0.6, 0.7, 1.0)));
+    scene.buildAcceleration();
 
     // Set up player and camera
     Player player;
@@ -26,6 +39,8 @@ int main() {
 
     // Set up ray tracer
     RayTracer tracer(&scene, &camera);
+    tracer.samplesPerPixel = 4;   // anti-aliasing
+    tracer.maxDepth = 4;          // reflection bounces
 
     int width = 800;
     int height = 600;

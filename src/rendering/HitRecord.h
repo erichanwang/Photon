@@ -7,7 +7,7 @@
 class Object;
 
 struct HitRecord {
-    double t;
+    double t = 0.0;
     Vector3D point;
     Vector3D normal;
     Material material;

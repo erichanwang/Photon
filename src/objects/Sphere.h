@@ -35,6 +35,12 @@ public:
         rec.material = material;
         return true;
     }
+
+    bool boundingBox(AABB& out) const override {
+        Vector3D r(radius, radius, radius);
+        out = AABB(center - r, center + r);
+        return true;
+    }
 };
 
 #endif // SPHERE_H

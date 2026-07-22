@@ -2,6 +2,7 @@
 #define BLOCK_H
 
 #include <utility>
+#include <cmath>
 #include "../math/Vector3D.h"
 #include "../math/Ray.h"
 #include "../rendering/Material.h"
@@ -55,13 +56,39 @@ public:
             tmax = tzmax;
 
         double t = tmin;
+        if (t < tMin) t = tmax;          // origin inside the box: use the exit face
         if (t < tMin || t > tMax) return false;
 
         rec.t = t;
         rec.point = ray.at(t);
-        rec.normal = Vector3D(0, 1, 0); // Simple normal, assume top
+        rec.normal = faceNormal(rec.point, min, max);
         rec.material = material;
         return true;
+    }
+
+    bool boundingBox(AABB& out) const override {
+        out = AABB(position - size * 0.5, position + size * 0.5);
+        return true;
+    }
+
+private:
+    // Which of the six faces the hit point lies on, by whichever coordinate is
+    // closest to its slab boundary. The previous hardcoded (0,1,0) was
+    // invisible under flat shading but makes every face light like the top one
+    // the moment a real lighting model is introduced.
+    static Vector3D faceNormal(const Vector3D& p, const Vector3D& min, const Vector3D& max) {
+        double dxMin = std::fabs(p.x - min.x), dxMax = std::fabs(p.x - max.x);
+        double dyMin = std::fabs(p.y - min.y), dyMax = std::fabs(p.y - max.y);
+        double dzMin = std::fabs(p.z - min.z), dzMax = std::fabs(p.z - max.z);
+
+        double best = dxMin;
+        Vector3D n(-1, 0, 0);
+        if (dxMax < best) { best = dxMax; n = Vector3D(1, 0, 0); }
+        if (dyMin < best) { best = dyMin; n = Vector3D(0, -1, 0); }
+        if (dyMax < best) { best = dyMax; n = Vector3D(0, 1, 0); }
+        if (dzMin < best) { best = dzMin; n = Vector3D(0, 0, -1); }
+        if (dzMax < best) { n = Vector3D(0, 0, 1); }
+        return n;
     }
 };
 

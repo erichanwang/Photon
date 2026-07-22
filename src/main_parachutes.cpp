@@ -22,8 +22,16 @@ int main() {
         scene.addObject(parachute);
         // Add physics with high drag
         RigidBody* rb = new RigidBody(parachute->position, 1.0, 5.0);
+        rb->radius = 0.5;
+        rb->restitution = 0.1;     // canopies land, they do not bounce
         scene.physics.addBody(rb);
     }
+
+    // The ground sphere's surface sits at y = -1; see main_blocks.cpp.
+    scene.physics.groundY = -1.0;
+
+    scene.addLight(Light(Vector3D(6, 12, 8), Vector3D(1.0, 0.95, 0.9), 1.4));
+    scene.addLight(Light::sun(Vector3D(-0.3, -1.0, -0.4), 0.35, Vector3D(0.6, 0.7, 1.0)));
 
     // Camera: yaw=-pi/2 faces -Z (toward the parachutes at z=0), pitch tilts up to frame them.
     Camera camera(Vector3D(0, 2, 10), -M_PI / 2, 0.46f, 90, 16.0/9.0);
@@ -48,6 +56,10 @@ int main() {
                 }
             }
         }
+
+        // Objects moved this frame, so the BVH built for the previous one is
+        // stale. Rebuilding is cheap next to the render it accelerates.
+        scene.buildAcceleration();
 
         // Render
         rayTracer.render(scene, camera, width, height, image);

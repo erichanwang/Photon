@@ -36,6 +36,12 @@ public:
         rec.material = material;
         return true;
     }
+
+    bool boundingBox(AABB& out) const override {
+        Vector3D r(radius, radius, radius);
+        out = AABB(position - r, position + r);
+        return true;
+    }
 };
 
 #endif // PARACHUTE_H
