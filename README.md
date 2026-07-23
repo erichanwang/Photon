@@ -178,6 +178,25 @@ ray counter on every ray; that single contended cache line cost roughly half
 the achievable scaling, and the counter is now thread-local and folded in
 once per worker.
 
+**Broad phase: O(n^2) all-pairs loop vs. spatial hash**
+
+```sh
+./build/BroadphaseBench
+```
+
+| Bodies | O(n^2) | Spatial hash | Speedup |
+|---|---|---|---|
+| 100 | 0.050 ms | 0.146 ms | 0.34x |
+| 1,000 | 2.991 ms | 1.990 ms | 1.50x |
+| 10,000 | 300.220 ms | 13.444 ms | 22.33x |
+
+The all-pairs loop is genuinely faster below roughly 300 bodies, where the
+hashing overhead exceeds the pairs it saves; `BroadphaseBench` bisects for the
+exact crossover each run rather than quoting one body count as universal. It
+also asserts the hash's candidate set is a superset of every colliding pair
+the exhaustive loop finds before reporting any timing, since a broad phase
+that drops a pair is a tunnelling bug no speedup is worth.
+
 ## Known limitations
 
 The control loop itself is real and tested, but nothing here reads a real
@@ -210,8 +229,9 @@ split from any input source:
 
 Collision treats every body as a sphere, so blocks resolve against their
 bounding sphere rather than their faces and will not come to rest on a corner
-realistically. The broad phase is an O(n^2) pair loop, which is fine for the
-tens of bodies these demos use.
+realistically. The broad phase is a uniform spatial hash (`src/physics/BroadPhase.h`);
+below roughly 300 bodies the plain O(n^2) loop it replaced is still faster,
+since the demos here only ever run tens of bodies at once.
 
 The BVH is rebuilt from scratch each frame in the animated demos rather than
 refitted, regardless of which split heuristic is selected.
