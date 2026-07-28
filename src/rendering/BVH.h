@@ -5,6 +5,7 @@
 #include <vector>
 #include "../math/AABB.h"
 #include "../objects/Object.h"
+#include "../objects/Sphere.h"
 
 // Bounding volume hierarchy over the scene's bounded objects.
 //
@@ -29,6 +30,14 @@ public:
     std::vector<Node> nodes;
     std::vector<Object*> order;   // objects permuted into leaf-contiguous order
 
+    // Leaf-contiguous SoA mirror of `order`, one entry per index, populated
+    // once after the tree is built. Spheres are the common case in these
+    // scenes, and a leaf test that reads four contiguous doubles per
+    // candidate beats one that dereferences a heap-scattered Sphere through
+    // a vtable call -- same math (Sphere::intersectAt), fewer cache misses.
+    std::vector<double> sphereCenterX, sphereCenterY, sphereCenterZ, sphereRadius;
+    std::vector<bool> isSphere;
+
     static const int kLeafSize = 2;
 
     // Median split just picks the middle element of the longest axis, no
@@ -47,13 +56,66 @@ public:
         if (order.empty()) return;
         nodes.reserve(order.size() * 2);
         buildRange(0, (int)order.size(), heuristic);
+
+        // order's final permutation is stable once buildRange returns --
+        // objects only move while a range is still being partitioned, never
+        // after it settles into a leaf -- so this pass runs once per build.
+        size_t n = order.size();
+        sphereCenterX.assign(n, 0.0);
+        sphereCenterY.assign(n, 0.0);
+        sphereCenterZ.assign(n, 0.0);
+        sphereRadius.assign(n, 0.0);
+        isSphere.assign(n, false);
+        for (size_t i = 0; i < n; i++) {
+            if (Sphere* s = dynamic_cast<Sphere*>(order[i])) {
+                sphereCenterX[i] = s->center.x;
+                sphereCenterY[i] = s->center.y;
+                sphereCenterZ[i] = s->center.z;
+                sphereRadius[i] = s->radius;
+                isSphere[i] = true;
+            }
+        }
     }
 
     bool empty() const { return nodes.empty(); }
 
     bool intersect(const Ray& ray, double tMin, double tMax, HitRecord& rec) const {
         if (nodes.empty()) return false;
-        return intersectNode(0, ray, tMin, tMax, rec);
+        // Computed once per ray rather than once per node visited -- see
+        // AABB::hit's precomputed-invDir overload.
+        Vector3D invDir(1.0 / ray.direction.x, 1.0 / ray.direction.y, 1.0 / ray.direction.z);
+        return intersectNode(0, ray, invDir, tMin, tMax, rec);
+    }
+
+    // Batched 4-ray primary-ray traversal. Walks the tree once for all four
+    // rays instead of four separate top-to-bottom passes: a node is visited
+    // if any active lane's box test (AABB::hit4) still wants it, and each
+    // lane's tMax/rec only ever updates from that lane's own box and object
+    // tests. That makes this the union of what four independent intersect()
+    // calls would visit, with identical per-lane arithmetic throughout (see
+    // AABB::hit4's comment) -- so the result is bit-for-bit what calling
+    // intersect() four times would produce, just cheaper when the four rays'
+    // paths through the tree overlap, which adjacent camera rays' do.
+    //
+    // `tMax` is read (as the caller's search bound) and written in place
+    // (shrunk on every closer hit, exactly like the `closest` variable in
+    // the scalar leaf loop below). `activeMask` marks which of the 4 lanes
+    // hold a real ray.
+    void intersect4(const Ray rays[4], double tMin, double tMax[4], HitRecord rec[4],
+                    bool hit[4], int activeMask) const {
+        for (int k = 0; k < 4; k++) hit[k] = false;
+        if (nodes.empty() || activeMask == 0) return;
+
+        double ox[4], oy[4], oz[4], idx[4], idy[4], idz[4], tMinArr[4];
+        for (int k = 0; k < 4; k++) {
+            tMinArr[k] = tMin;
+            if (!(activeMask & (1 << k))) { ox[k] = oy[k] = oz[k] = idx[k] = idy[k] = idz[k] = 0.0; continue; }
+            ox[k] = rays[k].origin.x; oy[k] = rays[k].origin.y; oz[k] = rays[k].origin.z;
+            idx[k] = 1.0 / rays[k].direction.x;
+            idy[k] = 1.0 / rays[k].direction.y;
+            idz[k] = 1.0 / rays[k].direction.z;
+        }
+        intersectNode4(0, rays, ox, oy, oz, idx, idy, idz, tMinArr, tMax, rec, hit, activeMask);
     }
 
     // Depth of the built tree, for the benchmark's reporting.
@@ -277,16 +339,25 @@ private:
         return index;
     }
 
-    bool intersectNode(int index, const Ray& ray, double tMin, double tMax, HitRecord& rec) const {
+    bool intersectNode(int index, const Ray& ray, const Vector3D& invDir,
+                       double tMin, double tMax, HitRecord& rec) const {
         const Node& n = nodes[index];
-        if (!n.box.hit(ray, tMin, tMax)) return false;
+        if (!n.box.hit(ray, invDir, tMin, tMax)) return false;
 
         if (n.left < 0) {
             bool hit = false;
             HitRecord temp;
             double closest = tMax;
             for (int i = n.firstObject; i < n.firstObject + n.objectCount; i++) {
-                if (order[i]->intersect(ray, tMin, closest, temp)) {
+                bool candidateHit;
+                if (isSphere[i]) {
+                    Vector3D center(sphereCenterX[i], sphereCenterY[i], sphereCenterZ[i]);
+                    candidateHit = Sphere::intersectAt(center, sphereRadius[i], ray, tMin, closest, temp);
+                    if (candidateHit) temp.material = static_cast<Sphere*>(order[i])->material;
+                } else {
+                    candidateHit = order[i]->intersect(ray, tMin, closest, temp);
+                }
+                if (candidateHit) {
                     hit = true;
                     closest = temp.t;
                     rec = temp;
@@ -297,10 +368,60 @@ private:
 
         // Shrinking tMax after a left hit lets the right subtree's box test
         // reject everything farther away, which is where the speedup comes from.
-        bool hitLeft = intersectNode(n.left, ray, tMin, tMax, rec);
+        bool hitLeft = intersectNode(n.left, ray, invDir, tMin, tMax, rec);
         if (hitLeft) tMax = rec.t;
-        bool hitRight = intersectNode(n.right, ray, tMin, tMax, rec);
+        bool hitRight = intersectNode(n.right, ray, invDir, tMin, tMax, rec);
         return hitLeft || hitRight;
+    }
+
+    // Packet counterpart of intersectNode. `mask` is which lanes are still
+    // live for this subtree (already narrowed by the parent's box test);
+    // this node's own box test narrows it further before deciding whether to
+    // recurse or, at a leaf, which lanes' tMax/rec to update.
+    void intersectNode4(int index, const Ray rays[4],
+                        const double ox[4], const double oy[4], const double oz[4],
+                        const double idx[4], const double idy[4], const double idz[4],
+                        const double tMin[4], double tMax[4], HitRecord rec[4], bool hit[4],
+                        int mask) const {
+        const Node& n = nodes[index];
+        int active = AABB::hit4(n.box, ox, oy, oz, idx, idy, idz, tMin, tMax, mask);
+        if (active == 0) return;
+
+        if (n.left < 0) {
+            for (int k = 0; k < 4; k++) {
+                if (!(active & (1 << k))) continue;
+                bool anyHit = false;
+                HitRecord temp;
+                double closest = tMax[k];
+                for (int i = n.firstObject; i < n.firstObject + n.objectCount; i++) {
+                    bool candidateHit;
+                    if (isSphere[i]) {
+                        Vector3D center(sphereCenterX[i], sphereCenterY[i], sphereCenterZ[i]);
+                        candidateHit = Sphere::intersectAt(center, sphereRadius[i], rays[k], tMin[k], closest, temp);
+                        if (candidateHit) temp.material = static_cast<Sphere*>(order[i])->material;
+                    } else {
+                        candidateHit = order[i]->intersect(rays[k], tMin[k], closest, temp);
+                    }
+                    if (candidateHit) {
+                        anyHit = true;
+                        closest = temp.t;
+                        rec[k] = temp;
+                    }
+                }
+                if (anyHit) {
+                    hit[k] = true;
+                    tMax[k] = closest;
+                }
+            }
+            return;
+        }
+
+        // Same shrink-then-test-right ordering as the scalar path, applied
+        // per lane: each lane's own tMax narrows independently as it finds
+        // hits in the left subtree, and the right subtree's box test for
+        // that lane sees the narrowed value.
+        intersectNode4(n.left, rays, ox, oy, oz, idx, idy, idz, tMin, tMax, rec, hit, active);
+        intersectNode4(n.right, rays, ox, oy, oz, idx, idy, idz, tMin, tMax, rec, hit, active);
     }
 };
 

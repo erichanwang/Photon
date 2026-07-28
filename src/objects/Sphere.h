@@ -16,7 +16,12 @@ public:
 
     Sphere(const Vector3D& c, double r, const Material& mat) : center(c), radius(r), material(mat) {}
 
-    bool intersect(const Ray& ray, double tMin, double tMax, HitRecord& rec) const override {
+    // Geometry-only intersection, split out from intersect() so the BVH's
+    // SoA leaf path can call the exact same math against a center/radius
+    // pulled from flat arrays instead of a heap-scattered Sphere. Leaves
+    // rec.material untouched -- callers that own a Sphere fill that in.
+    static bool intersectAt(const Vector3D& center, double radius, const Ray& ray,
+                            double tMin, double tMax, HitRecord& rec) {
         Vector3D oc = ray.origin - center;
         double a = ray.direction.dot(ray.direction);
         double b = 2.0 * oc.dot(ray.direction);
@@ -32,6 +37,11 @@ public:
         rec.t = root;
         rec.point = ray.at(root);
         rec.normal = (rec.point - center) / radius;
+        return true;
+    }
+
+    bool intersect(const Ray& ray, double tMin, double tMax, HitRecord& rec) const override {
+        if (!intersectAt(center, radius, ray, tMin, tMax, rec)) return false;
         rec.material = material;
         return true;
     }

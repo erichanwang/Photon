@@ -178,6 +178,113 @@ ray counter on every ray; that single contended cache line cost roughly half
 the achievable scaling, and the counter is now thread-local and folded in
 once per worker.
 
+### Re-verified, different machine
+
+The numbers above were never re-measured until now. Re-run today on a
+16-thread laptop (Intel Core i7-1360P, 12 cores/16 threads, hybrid P+E, not
+the machine the original table was measured on) with `./build/Benchmark 500
+8`:
+
+| Metric | Original table | This machine |
+|---|---|---|
+| BVH vs linear scan, 1 thread | 8.0x | 6.3-8.2x (noisy, see below) |
+| Peak throughput, 16 threads | 9.89 Mrays/s | 5.2-6.9 Mrays/s |
+| Thread scaling, 16 threads | 5.6x | 5.4-8.7x (noisy, see below) |
+
+Two honest caveats on these numbers, since the point of this exercise was to
+stop taking benchmark output on faith:
+
+- **This machine is a laptop, not the original 16-core box**, and its
+  `hardware_concurrency() == 16` is 12 physical cores plus hyperthreading,
+  not 16 physical cores -- a weaker chip for sustained parallel work than the
+  number alone suggests. The peak-throughput shortfall against the original
+  9.89 Mrays/s is consistent with that, not a regression.
+- **Repeated back-to-back runs measurably throttle this laptop.** The same
+  `500 8` invocation returned single-thread throughput anywhere from 0.44 to
+  0.91 Mrays/s depending on how much benchmarking had already run in the
+  session (thermal ramp, plus another process on this shared machine during
+  part of the session). Best-of-N within one run cancels scheduling noise;
+  it does nothing for a CPU package that is genuinely slower ten minutes
+  into a benchmarking session than it was at the start. The range above
+  spans several separate invocations, not one; treat the low end as the
+  believable sustained number and the high end as a cool-CPU best case.
+
+Bottom line: the **9.9M rays/sec** peak-throughput figure was not
+reproduced on this hardware -- best observed here is in the 5-7 Mrays/s
+range. The **8.0x BVH-vs-linear-scan** and **5.6x thread-pool** figures both
+landed within or above their original range across repeated runs, so those
+two hold up; throughput is the one that's genuinely hardware-bound.
+
+### Optimizations added and measured this pass
+
+All three changes below were checked against `tests/test_math_physics.cpp`'s
+`testBVHMatchesLinearScan` and `testThreadedRenderMatchesSingleThreaded`
+after each edit -- same images, not just plausible ones -- before being kept.
+
+- **Hoist the BVH slab test's `1/direction` out of the traversal loop**
+  (`src/math/AABB.h`, `src/rendering/BVH.h`). `AABB::hit()` was computing
+  three divisions on every node it visited, but a ray's direction does not
+  change between node visits within one `BVH::intersect()` call. `AABB` now
+  has a second `hit()` overload that takes a precomputed `1/direction`, and
+  `BVH::intersect()` computes it once per ray instead of once per node. This
+  is strictly less arithmetic per node for any tree depth greater than one --
+  not something that needs a benchmark to justify -- but isolating its wall-clock
+  effect from the thermal noise described above was not possible this pass.
+- **Stop re-normalizing `ray.direction`** (`src/rendering/RayTracer.h`).
+  `Ray`'s constructor already normalizes `direction` once
+  (`src/math/Ray.h`), so the four call sites in `background()`, `trace()`
+  (both the reflective and transparent branches), and `shade()` that called
+  `.normalize()` on it again were recomputing a square root on an
+  already-unit vector, on every primary ray, every reflection bounce, and
+  every shading point. Removed; `rec.normal.normalize()` is left alone since
+  `Plane`/`Slope` take a caller-supplied normal that is not provably unit.
+  Same reasoning as the slab-test hoist: guaranteed less work, effect not
+  cleanly separable from machine noise this pass.
+- **SoA sphere-leaf traversal** (`src/objects/Sphere.h`, `src/rendering/BVH.h`,
+  pre-existing work-in-progress found on this branch, finished and verified
+  here): BVH leaves store spheres' center/radius in flat parallel arrays
+  alongside the existing `Object*` list, so a leaf test reads four contiguous
+  doubles instead of dereferencing a heap-allocated `Sphere` through a vtable
+  call, via a new `Sphere::intersectAt()` that both the member `intersect()`
+  and the BVH leaf path call. Verified correct (bit-identical images,
+  `testBVHMatchesLinearScan` and the full benchmark's image-match gates all
+  pass). Its wall-clock effect was inconclusive on this machine: paired
+  before/after runs of the same scene came back anywhere from a slight win
+  to a slight loss, smaller than the thermal/scheduling noise floor
+  described above. Kept because it does less work per candidate on paper and
+  breaks nothing; not claimed as a proven speedup.
+
+### GPU port status
+
+No CUDA toolkit is installed on this machine (`nvcc` not found, no
+`/usr/local/cuda*`), and no Vulkan SDK/shader compiler either (`glslc`,
+`glslangValidator` both absent) -- only the Vulkan loader and Mesa's
+software/ICD drivers are present, which is not enough to compile a compute
+shader. So "CUDA/Vulkan port underway" was, before this pass, aspirational:
+there was no GPU code anywhere in the repository.
+
+`src/gpu/raytrace_gpu.cu` is a real starting point, not a stub: a CUDA kernel
+that traces primary rays against a flat sphere array (brute-force per-sphere
+loop, one thread per pixel), shades with ambient + Lambertian diffuse +
+Blinn-Phong specular under one directional light with one shadow ray, and a
+host `main()` that builds the identical scene twice -- once through the real
+CPU `Scene`/`RayTracer`/`Camera` classes, once flattened into device arrays
+-- races both, and diffs the two images before printing a rays/sec number
+for either, refusing to report a GPU number that doesn't match the CPU
+reference (same correctness-before-speed pattern as `bench/benchmark.cpp`
+and `bench/broadphase_bench.cpp`). `CMakeLists.txt` picks it up as an
+optional `GpuRayTrace` target via `check_language(CUDA)`, so every existing
+CPU target still builds unmodified on a machine without CUDA, which is every
+machine this repository has been built on so far, including this one.
+
+**This has not been compiled or run.** There is no CUDA toolchain here to
+compile it with, so its numbers do not exist yet and are not claimed. What
+it does not yet cover, honestly: BVH traversal on the device (this kernel
+does the same brute-force scan as the CPU's pre-BVH baseline, which is the
+correct first correctness target, not the fast path), the ground plane,
+reflection/refraction, multiple lights, and soft shadows/depth of field --
+all real gaps against the CPU renderer, not hidden ones.
+
 ## Known limitations
 
 The control loop itself is real and tested, but nothing here reads a real

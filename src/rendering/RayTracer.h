@@ -43,7 +43,10 @@ public:
 
     // The sky, for rays that hit nothing.
     static Vector3D background(const Ray& ray) {
-        Vector3D unitDir = ray.direction.normalize();
+        // ray.direction is already unit -- Ray's constructor normalizes it --
+        // so re-normalizing here was pure wasted sqrt work on the hottest path
+        // in the renderer (every miss goes through this).
+        const Vector3D& unitDir = ray.direction;
         double t = 0.5 * (unitDir.y + 1.0);
         return Vector3D(1.0, 1.0, 1.0) * (1.0 - t) + Vector3D(0.5, 0.7, 1.0) * t;
     }
@@ -88,7 +91,19 @@ public:
     Vector3D trace(const Ray& ray, int depth, int px = 0, int py = 0, int s = 0) const {
         localRayCount++;
         HitRecord rec;
-        if (!scene->intersect(ray, 0.001, 1e9, rec)) return background(ray);
+        bool hit = scene->intersect(ray, 0.001, 1e9, rec);
+        return traceWithHit(ray, depth, hit, rec, px, py, s);
+    }
+
+    // Continues trace() from an already-computed primary intersection.
+    // Split out so the batched 4-ray packet path (renderPixelPacket4) can
+    // reuse all of the shading/reflection/refraction logic below without
+    // re-testing the ray against the scene -- the packet's BVH traversal
+    // already answered that. trace() above is the exact original body,
+    // just handing off here after doing its own scene->intersect().
+    Vector3D traceWithHit(const Ray& ray, int depth, bool hit, const HitRecord& rec,
+                          int px = 0, int py = 0, int s = 0) const {
+        if (!hit) return background(ray);
 
         Vector3D albedo = albedoAt(rec);
 
@@ -104,7 +119,7 @@ public:
 
         if (trans > 0.0 && depth > 0) {
             Vector3D n = rec.normal.normalize();
-            Vector3D d = ray.direction.normalize();
+            const Vector3D& d = ray.direction;   // already unit, see background()
 
             // A ray leaving the glass hits the same surface from inside, where
             // the stored normal points the wrong way and the two media are
@@ -144,7 +159,7 @@ public:
             color = color * (1.0 - trans) + through * trans;
         } else if (refl > 0.0 && depth > 0) {
             Vector3D n = rec.normal.normalize();
-            Vector3D d = ray.direction.normalize();
+            const Vector3D& d = ray.direction;   // already unit, see background()
             Vector3D reflectedDir = d - n * (2.0 * d.dot(n));
             // Offset along the normal, or the reflected ray immediately re-hits
             // the surface it just left and the image self-shadows.
@@ -163,7 +178,7 @@ public:
     Vector3D shade(const Ray& ray, const HitRecord& rec, const Vector3D& albedo,
                    int px = 0, int py = 0, int s = 0) const {
         Vector3D n = rec.normal.normalize();
-        Vector3D viewDir = -ray.direction.normalize();
+        Vector3D viewDir = -ray.direction;   // already unit, see background()
         // Two-sided shading: a normal pointing away from the viewer means we
         // hit a back face, and lighting it with the outward normal renders it
         // black no matter where the light is.
@@ -303,11 +318,62 @@ public:
     }
 
 private:
+    // Renders 4 adjacent pixels' primary rays as one SIMD packet (see
+    // BVH::intersect4): their camera rays are tested against the tree in a
+    // single batched traversal instead of four separate ones. Everything
+    // after that first hit -- shading, shadows, reflection/refraction rays
+    // -- is unchanged scalar traceWithHit(), called once per lane with
+    // exactly the px/py/s the equivalent renderPixel() call would have used,
+    // so this produces bit-identical pixels to the non-packet path.
+    void renderPixelPacket4(int x0, int y, int width, int height,
+                            std::vector<Vector3D>& image) const {
+        int samples = samplesPerPixel <= 1 ? 1 : samplesPerPixel;
+        Vector3D sums[4];
+
+        for (int s = 0; s < samples; s++) {
+            Ray rays[4];
+            for (int k = 0; k < 4; k++) {
+                int x = x0 + k;
+                double jx = 0.0, jy = 0.0, lensU, lensV;
+                if (samplesPerPixel <= 1) {
+                    lensU = hashToUnit(x, y, 1000);
+                    lensV = hashToUnit(x, y, 1001);
+                } else {
+                    jx = hashToUnit(x, y, s * 4 + 0);
+                    jy = hashToUnit(x, y, s * 4 + 1);
+                    lensU = hashToUnit(x, y, s * 4 + 2);
+                    lensV = hashToUnit(x, y, s * 4 + 3);
+                }
+                double u = (double(x) + jx) / double(width);
+                double v = (double(y) + jy) / double(height);
+                rays[k] = camera->getRay(u, v, lensU, lensV);
+            }
+
+            double tMax[4] = { 1e9, 1e9, 1e9, 1e9 };
+            HitRecord rec[4];
+            bool hit[4];
+            scene->intersect4(rays, 0.001, tMax, rec, hit, 0xF);
+
+            for (int k = 0; k < 4; k++) {
+                localRayCount++;
+                Vector3D c = traceWithHit(rays[k], maxDepth, hit[k], rec[k], x0 + k, y, s);
+                if (s == 0) sums[k] = c; else sums[k] += c;
+            }
+        }
+
+        for (int k = 0; k < 4; k++)
+            image[(size_t)y * width + x0 + k] = samples > 1 ? sums[k] / double(samples) : sums[k];
+    }
+
     void renderRows(int rowBegin, int rowEnd, int width, int height,
                     std::vector<Vector3D>& image) const {
-        for (int j = rowBegin; j < rowEnd; j++)
-            for (int i = 0; i < width; i++)
+        for (int j = rowBegin; j < rowEnd; j++) {
+            int i = 0;
+            for (; i + 4 <= width; i += 4)
+                renderPixelPacket4(i, j, width, height, image);
+            for (; i < width; i++)
                 image[(size_t)j * width + i] = renderPixel(i, j, width, height);
+        }
     }
 
     // Small integer hash (a Wang-style mix) mapped into [0,1). Cheap, and

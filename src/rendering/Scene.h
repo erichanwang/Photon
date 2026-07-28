@@ -62,6 +62,38 @@ public:
         return hit;
     }
 
+    // Batched primary-ray counterpart of intersect(), for the renderer's
+    // packet path (see RayTracer::renderPixelPacket4). Same two-stage shape
+    // as intersect() above -- BVH first, then the short unbounded list --
+    // just with the BVH stage vectorized across the 4 rays. Each lane's
+    // tMax/rec updates in the same order intersect() would produce them in,
+    // so calling this once on a 4-ray packet is equivalent to calling
+    // intersect() four times.
+    void intersect4(const Ray rays[4], double tMin, double tMax[4], HitRecord rec[4],
+                    bool hit[4], int activeMask) const {
+        for (int k = 0; k < 4; k++) hit[k] = false;
+        if (!accelerationValid) {
+            for (int k = 0; k < 4; k++) {
+                if (!(activeMask & (1 << k))) continue;
+                hit[k] = linearIntersect(rays[k], tMin, tMax[k], rec[k]);
+            }
+            return;
+        }
+
+        bvh.intersect4(rays, tMin, tMax, rec, hit, activeMask);
+        for (Object* o : unbounded) {
+            for (int k = 0; k < 4; k++) {
+                if (!(activeMask & (1 << k))) continue;
+                HitRecord temp;
+                if (o->intersect(rays[k], tMin, tMax[k], temp)) {
+                    hit[k] = true;
+                    tMax[k] = temp.t;
+                    rec[k] = temp;
+                }
+            }
+        }
+    }
+
     // The pre-BVH path, kept so the test suite can assert the accelerated
     // result is identical to the exhaustive one rather than merely plausible.
     bool linearIntersect(const Ray& ray, double tMin, double tMax, HitRecord& rec) const {
