@@ -2,6 +2,8 @@
 #define BVH_H
 
 #include <algorithm>
+#include <cstdint>
+#include <limits>
 #include <vector>
 #include "../math/AABB.h"
 #include "../objects/Object.h"
@@ -19,12 +21,40 @@
 // across the heap is what makes naive BVHs slower than they should be.
 class BVH {
 public:
+    // 32 bytes so two nodes share one 64-byte cache line, instead of the
+    // previous 64-byte node (a double-precision AABB alone was 48 bytes).
+    // Two changes get there:
+    //  - box bounds stored as float, not double. Traversal only ever uses
+    //    them to reject a ray, and a box that's rounded OUTWARD (min down,
+    //    max up, see roundDown/roundUp below) can only become more
+    //    permissive than the true double-precision box, never reject a ray
+    //    the real intersection would accept -- same guarantee buildRange's
+    //    kBoxPad already relies on, just covering float rounding too.
+    //  - left/right and firstObject/objectCount never coexist (a node is
+    //    either a leaf or has two children), so they share two int32
+    //    fields. leftOrNegFirst < 0 marks a leaf, mirroring the old
+    //    `left == -1` check; its magnitude encodes firstObject so 0 is
+    //    still representable (-(begin) - 1, decoded as -(v) - 1).
     struct Node {
-        AABB box;
-        int left = -1;       // index of left child, or -1 for a leaf
-        int right = -1;
-        int firstObject = 0; // leaves only: range into `order`
-        int objectCount = 0;
+        float boxMin[3] = {0, 0, 0};
+        float boxMax[3] = {0, 0, 0};
+        int32_t leftOrNegFirst = -1;
+        int32_t rightOrCount = 0;
+
+        bool isLeaf() const { return leftOrNegFirst < 0; }
+        int left() const { return leftOrNegFirst; }
+        int right() const { return rightOrCount; }
+        int firstObject() const { return -leftOrNegFirst - 1; }
+        int objectCount() const { return rightOrCount; }
+
+        // Promotes the stored float box back to the double AABB the ray
+        // test math is written in terms of. float -> double widening is
+        // exact, so this loses nothing beyond what storing as float already
+        // costs (and roundDown/roundUp already made that conservative).
+        AABB box() const {
+            return AABB(Vector3D(boxMin[0], boxMin[1], boxMin[2]),
+                        Vector3D(boxMax[0], boxMax[1], boxMax[2]));
+        }
     };
 
     std::vector<Node> nodes;
@@ -122,8 +152,8 @@ public:
     int depth(int node = 0) const {
         if (nodes.empty()) return 0;
         const Node& n = nodes[node];
-        if (n.left < 0) return 1;
-        return 1 + std::max(depth(n.left), depth(n.right));
+        if (n.isLeaf()) return 1;
+        return 1 + std::max(depth(n.left()), depth(n.right()));
     }
 
 private:
@@ -156,9 +186,9 @@ private:
 
         int l = buildRange(begin, mid, Heuristic::Median);
         int r = buildRange(mid, end, Heuristic::Median);
-        nodes[index].box = bounds;
-        nodes[index].left = l;
-        nodes[index].right = r;
+        setBox(index, bounds);
+        nodes[index].leftOrNegFirst = l;
+        nodes[index].rightOrCount = r;
         return index;
     }
 
@@ -250,6 +280,30 @@ private:
     // it can't produce a different answer from the linear scan.
     static constexpr double kBoxPad = 1e-6;
 
+    // Round a double down/up to the nearest float, nudging by one float ULP
+    // if the default (round-to-nearest) cast landed on the wrong side. That
+    // guarantees the stored float box is never tighter than the true bounds
+    // -- see the Node comment above for why that matters.
+    static float roundDown(double v) {
+        float f = (float)v;
+        if ((double)f > v) f = std::nextafter(f, -std::numeric_limits<float>::infinity());
+        return f;
+    }
+    static float roundUp(double v) {
+        float f = (float)v;
+        if ((double)f < v) f = std::nextafter(f, std::numeric_limits<float>::infinity());
+        return f;
+    }
+
+    void setBox(int index, const AABB& b) {
+        nodes[index].boxMin[0] = roundDown(b.min.x);
+        nodes[index].boxMin[1] = roundDown(b.min.y);
+        nodes[index].boxMin[2] = roundDown(b.min.z);
+        nodes[index].boxMax[0] = roundUp(b.max.x);
+        nodes[index].boxMax[1] = roundUp(b.max.y);
+        nodes[index].boxMax[2] = roundUp(b.max.z);
+    }
+
     int buildRange(int begin, int end, Heuristic heuristic) {
         AABB bounds;
         for (int i = begin; i < end; i++) {
@@ -265,9 +319,9 @@ private:
         if (count <= kLeafSize) {
             int index = (int)nodes.size();
             nodes.push_back(Node{});
-            nodes[index].box = bounds;
-            nodes[index].firstObject = begin;
-            nodes[index].objectCount = count;
+            setBox(index, bounds);
+            nodes[index].leftOrNegFirst = -begin - 1;
+            nodes[index].rightOrCount = count;
             return index;
         }
 
@@ -333,22 +387,23 @@ private:
         nodes.push_back(Node{});
         int l = buildRange(begin, splitIndex, Heuristic::SAH);
         int r = buildRange(splitIndex, end, Heuristic::SAH);
-        nodes[index].box = bounds;
-        nodes[index].left = l;
-        nodes[index].right = r;
+        setBox(index, bounds);
+        nodes[index].leftOrNegFirst = l;
+        nodes[index].rightOrCount = r;
         return index;
     }
 
     bool intersectNode(int index, const Ray& ray, const Vector3D& invDir,
                        double tMin, double tMax, HitRecord& rec) const {
         const Node& n = nodes[index];
-        if (!n.box.hit(ray, invDir, tMin, tMax)) return false;
+        if (!n.box().hit(ray, invDir, tMin, tMax)) return false;
 
-        if (n.left < 0) {
+        if (n.isLeaf()) {
             bool hit = false;
             HitRecord temp;
             double closest = tMax;
-            for (int i = n.firstObject; i < n.firstObject + n.objectCount; i++) {
+            int firstObject = n.firstObject(), objectCount = n.objectCount();
+            for (int i = firstObject; i < firstObject + objectCount; i++) {
                 bool candidateHit;
                 if (isSphere[i]) {
                     Vector3D center(sphereCenterX[i], sphereCenterY[i], sphereCenterZ[i]);
@@ -368,9 +423,9 @@ private:
 
         // Shrinking tMax after a left hit lets the right subtree's box test
         // reject everything farther away, which is where the speedup comes from.
-        bool hitLeft = intersectNode(n.left, ray, invDir, tMin, tMax, rec);
+        bool hitLeft = intersectNode(n.left(), ray, invDir, tMin, tMax, rec);
         if (hitLeft) tMax = rec.t;
-        bool hitRight = intersectNode(n.right, ray, invDir, tMin, tMax, rec);
+        bool hitRight = intersectNode(n.right(), ray, invDir, tMin, tMax, rec);
         return hitLeft || hitRight;
     }
 
@@ -384,16 +439,18 @@ private:
                         const double tMin[4], double tMax[4], HitRecord rec[4], bool hit[4],
                         int mask) const {
         const Node& n = nodes[index];
-        int active = AABB::hit4(n.box, ox, oy, oz, idx, idy, idz, tMin, tMax, mask);
+        AABB box = n.box();
+        int active = AABB::hit4(box, ox, oy, oz, idx, idy, idz, tMin, tMax, mask);
         if (active == 0) return;
 
-        if (n.left < 0) {
+        if (n.isLeaf()) {
+            int firstObject = n.firstObject(), objectCount = n.objectCount();
             for (int k = 0; k < 4; k++) {
                 if (!(active & (1 << k))) continue;
                 bool anyHit = false;
                 HitRecord temp;
                 double closest = tMax[k];
-                for (int i = n.firstObject; i < n.firstObject + n.objectCount; i++) {
+                for (int i = firstObject; i < firstObject + objectCount; i++) {
                     bool candidateHit;
                     if (isSphere[i]) {
                         Vector3D center(sphereCenterX[i], sphereCenterY[i], sphereCenterZ[i]);
@@ -420,8 +477,8 @@ private:
         // per lane: each lane's own tMax narrows independently as it finds
         // hits in the left subtree, and the right subtree's box test for
         // that lane sees the narrowed value.
-        intersectNode4(n.left, rays, ox, oy, oz, idx, idy, idz, tMin, tMax, rec, hit, active);
-        intersectNode4(n.right, rays, ox, oy, oz, idx, idy, idz, tMin, tMax, rec, hit, active);
+        intersectNode4(n.left(), rays, ox, oy, oz, idx, idy, idz, tMin, tMax, rec, hit, active);
+        intersectNode4(n.right(), rays, ox, oy, oz, idx, idy, idz, tMin, tMax, rec, hit, active);
     }
 };
 
