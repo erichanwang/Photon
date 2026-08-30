@@ -53,7 +53,7 @@ intersection with a bounding volume hierarchy across a thread pool.
 - Four demo scenes: `main.cpp` (shading, shadows, reflections, 4x AA),
   `main_blocks.cpp` and `main_parachutes.cpp` (both animated, with
   collisions), and `main_control_demo.cpp` (drives `Player` through a
-  scripted `InputState` sequence — walk, jump, land — rendering one frame per
+  scripted `InputState` sequence (walk, jump, land), rendering one frame per
   input frame, to prove the control loop is real and not dead code).
 
 ## Building
@@ -188,8 +188,8 @@ also fails here for lack of sudo). To keep `Player::move()`/`jump()` genuinely
 reachable rather than dead code without that dependency, the control loop was
 split from any input source:
 
-- `InputState` (`src/physics/InputState.h`) is a plain struct — movement
-  axes, jump flag, look deltas — with no windowing dependency.
+- `InputState` (`src/physics/InputState.h`) is a plain struct, movement
+  axes, jump flag, look deltas, with no windowing dependency.
 - `Player::applyInput()` (`src/physics/Player.h`) is the actual control loop:
   jump, move, integrate gravity, land. This is exercised end to end, headlessly:
   `tests/test_math_physics.cpp`'s `testControlLoop` asserts landing, walking,
@@ -202,7 +202,7 @@ split from any input source:
 - `RaylibInputDriver`, in the same file, is written to show the intended
   wiring to real keyboard/mouse input, guarded behind
   `#ifdef PHOTON_USE_RAYLIB` so it compiles into nothing by default. It has
-  never been compiled or run in this environment — there is no way to verify
+  never been compiled or run in this environment; there is no way to verify
   it without a raylib library to link, and no interactive window can be
   confirmed here (no display/X server either). Getting from here to a
   playable build is linking raylib and passing `-DPHOTON_USE_RAYLIB`; no
