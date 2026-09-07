@@ -63,6 +63,19 @@ cmake -B build
 cmake --build build
 ```
 
+**CI badge (GitHub Actions)**
+
+[![CI](https://github.com/erichanwang/Photon/actions/workflows/ci.yml/badge.svg)](https://github.com/erichanwang/Photon/actions/workflows/ci.yml)
+
+---
+
+*Replace the placeholder above with your actual CI workflow name if you create one later.*
+
+```sh
+cmake -B build
+cmake --build build
+```
+
 This produces six targets: `GameEngine`, `Blocks`, `Parachutes`, `Tests`,
 `Benchmark`, and `ControlDemo`. Without CMake, each compiles directly, since
 none of them depend on anything outside this repo:
