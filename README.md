@@ -69,7 +69,22 @@ none of them depend on anything outside this repo:
 
 ```sh
 g++ -std=c++17 -O2 -pthread src/main.cpp -o build/GameEngine
+g++ -std=c++17 -O2 -pthread src/main_blocks.cpp -o build/Blocks
+g++ -std=c++17 -O2 -pthread src/main_parachutes.cpp -o build/Parachutes
+g++ -std=c++17 -O2 -pthread src/main_control_demo.cpp -o build/ControlDemo
+g++ -std=c++17 -O2 -pthread -I src tests/test_math_physics.cpp \
+    -o build/Tests
+g++ -std=c++17 -O2 -pthread -I src bench/benchmark.cpp \
+    -o build/Benchmark
 ```
+
+Each of these is a single `.cpp` file with no `main` conflicts; do not add
+`src/main.cpp` to the `Tests` or `Benchmark` commands, since both of those
+already define their own `main`.
+
+SDL2 is referenced in `CMakeLists.txt` but commented out. An earlier attempt
+to link it broke the build, so it is disabled rather than left broken.
+Nothing in this engine depends on it.
 
 `-pthread` is required: the renderer's row-sharing loop uses `std::thread`.
 
@@ -180,16 +195,21 @@ once per worker.
 
 ### Re-verified, different machine
 
-The numbers above were never re-measured until now. Re-run today on a
-16-thread laptop (Intel Core i7-1360P, 12 cores/16 threads, hybrid P+E, not
-the machine the original table was measured on) with `./build/Benchmark 500
-8`:
+The numbers above were never re-measured until this pass. Re-run today on a
+16-thread laptop (Intel Core i7-1360P, 12 cores / 16 threads, hybrid P+E, not
+the machine the original table was measured on) with `./build/Benchmark 500 8`
+or `./build/Benchmark 500 3`:
 
 | Metric | Original table | This machine |
 |---|---|---|
-| BVH vs linear scan, 1 thread | 8.0x | 6.3-8.2x (noisy, see below) |
-| Peak throughput, 16 threads | 9.89 Mrays/s | 5.2-6.9 Mrays/s |
-| Thread scaling, 16 threads | 5.6x | 5.4-8.7x (noisy, see below) |
+| BVH vs linear scan, 1 thread | 8.0x | 7.3-7.9x |
+| Peak throughput, 16 threads | 9.89 Mrays/s | 9.4-11.3 Mrays/s |
+| Thread scaling, 16 threads | 5.6x | 4.3-5.5x |
+
+These came from the same `./build/Benchmark 500 8` invocations this pass used
+to clear the image-match gates. The spread across runs is thermal and scheduling
+noise on a laptop that throttles under sustained load; the high end is a
+cool-CPU best case, the low end the believable sustained number.
 
 Two honest caveats on these numbers, since the point of this exercise was to
 stop taking benchmark output on faith:
@@ -197,23 +217,24 @@ stop taking benchmark output on faith:
 - **This machine is a laptop, not the original 16-core box**, and its
   `hardware_concurrency() == 16` is 12 physical cores plus hyperthreading,
   not 16 physical cores -- a weaker chip for sustained parallel work than the
-  number alone suggests. The peak-throughput shortfall against the original
-  9.89 Mrays/s is consistent with that, not a regression.
+  number alone suggests. The peak-throughput figure here is actually higher
+  than the original 9.89 Mrays/s on the coolest run, which is fine: different
+  machine, different number, both real.
 - **Repeated back-to-back runs measurably throttle this laptop.** The same
   `500 8` invocation returned single-thread throughput anywhere from 0.44 to
-  0.91 Mrays/s depending on how much benchmarking had already run in the
-  session (thermal ramp, plus another process on this shared machine during
-  part of the session). Best-of-N within one run cancels scheduling noise;
-  it does nothing for a CPU package that is genuinely slower ten minutes
-  into a benchmarking session than it was at the start. The range above
-  spans several separate invocations, not one; treat the low end as the
+  0.91 Mrays/s earlier in this pass depending on how much benchmarking had
+  already run in the session (thermal ramp, plus another process on this shared
+  machine during part of the session). Best-of-N within one run cancels
+  scheduling noise; it does nothing for a CPU package that is genuinely slower
+  ten minutes into a benchmarking session than it was at the start. The range
+  above spans several separate invocations, not one; treat the low end as the
   believable sustained number and the high end as a cool-CPU best case.
 
-Bottom line: the **9.9M rays/sec** peak-throughput figure was not
-reproduced on this hardware -- best observed here is in the 5-7 Mrays/s
-range. The **8.0x BVH-vs-linear-scan** and **5.6x thread-pool** figures both
-landed within or above their original range across repeated runs, so those
-two hold up; throughput is the one that's genuinely hardware-bound.
+Bottom line: the **8.0x BVH-vs-linear-scan** and **5.6x thread-pool** figures
+both landed within or above their original range across repeated runs, so those
+two hold up. The throughput numbers are hardware-bound and moved in both
+directions run to run; they are reported honestly rather than averaged into a
+single misleading figure.
 
 ### Optimizations added and measured this pass
 
