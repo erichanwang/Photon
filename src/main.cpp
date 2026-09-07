@@ -3,6 +3,7 @@
 #include <fstream>
 #include <string>
 #include "rendering/RayTracer.h"
+#include "rendering/Texture.h"
 #include "physics/Player.h"
 #include "objects/Sphere.h"
 #include "objects/Plane.h"
@@ -27,10 +28,7 @@ int main() {
                                Material::dielectric(Vector3D(1.0, 1.0, 1.0), 1.5)));
 
     Material groundMat;
-    groundMat.isGrid = true;
-    groundMat.gridColor1 = Vector3D(0.8, 0.8, 0.8);
-    groundMat.gridColor2 = Vector3D(0.2, 0.2, 0.2);
-    groundMat.gridSize = 1.0;
+    groundMat.texture = new CheckerTexture(Vector3D(0.8, 0.8, 0.8), Vector3D(0.2, 0.2, 0.2), 1.0);
     scene.addObject(new Plane(Vector3D(0, 0, 0), Vector3D(0, 1, 0), groundMat));
 
     scene.addLight(Light(Vector3D(4, 8, 1), Vector3D(1.0, 0.95, 0.9), 1.5));

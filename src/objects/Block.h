@@ -62,6 +62,21 @@ public:
         rec.t = t;
         rec.point = ray.at(t);
         rec.normal = faceNormal(rec.point, min, max);
+        // Box UV: project the hit onto whichever two axes the face's normal
+        // isn't along, normalized by that face's extent so each face covers
+        // UV [0,1]x[0,1] independently (seams at face edges, as usual for box
+        // mapping).
+        Vector3D local = rec.point - min;
+        if (std::fabs(rec.normal.x) > 0.5) {
+            rec.u = local.z / size.z;
+            rec.v = local.y / size.y;
+        } else if (std::fabs(rec.normal.y) > 0.5) {
+            rec.u = local.x / size.x;
+            rec.v = local.z / size.z;
+        } else {
+            rec.u = local.x / size.x;
+            rec.v = local.y / size.y;
+        }
         rec.material = material;
         return true;
     }

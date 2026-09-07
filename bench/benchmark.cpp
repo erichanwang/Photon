@@ -10,6 +10,7 @@
 #include <vector>
 #include <cmath>
 #include "../src/rendering/Scene.h"
+#include "../src/rendering/Texture.h"
 #include "../src/rendering/RayTracer.h"
 #include "../src/rendering/Camera.h"
 #include "../src/objects/Sphere.h"
@@ -35,10 +36,12 @@ static void buildScene(Scene& scene, int sphereCount) {
         scene.addObject(new Sphere(center, radius, m));
     }
     Material ground(Vector3D(0.55, 0.55, 0.6));
-    ground.isGrid = true;
-    ground.gridColor1 = Vector3D(0.75, 0.75, 0.75);
-    ground.gridColor2 = Vector3D(0.25, 0.25, 0.25);
-    ground.gridSize = 1.0;
+    // Same checkerboard the grid fields used to describe. Static so it
+    // outlives every Material that points at it; the benchmark builds its
+    // scene once and never frees it, matching how Object* is handled here.
+    static CheckerTexture groundChecker(Vector3D(0.75, 0.75, 0.75),
+                                        Vector3D(0.25, 0.25, 0.25), 1.0);
+    ground.texture = &groundChecker;
     scene.addObject(new Plane(Vector3D(0, -3, 0), Vector3D(0, 1, 0), ground));
 
     scene.addLight(Light(Vector3D(6, 10, 4), Vector3D(1.0, 0.95, 0.85), 1.3));

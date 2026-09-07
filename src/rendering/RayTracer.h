@@ -48,15 +48,11 @@ public:
         return Vector3D(1.0, 1.0, 1.0) * (1.0 - t) + Vector3D(0.5, 0.7, 1.0) * t;
     }
 
-    // Surface color before lighting: the checker pattern for grid materials,
-    // the flat material color otherwise.
+    // Surface color before lighting: the material's texture sampled at the
+    // hit's UV if it has one, the flat material color otherwise.
     static Vector3D albedoAt(const HitRecord& rec) {
-        if (!rec.material.isGrid) return rec.material.color;
-        int ix = (int)std::floor(rec.point.x / rec.material.gridSize);
-        int iz = (int)std::floor(rec.point.z / rec.material.gridSize);
-        // Floor-based indices go negative and C++ '%' keeps the sign, so an
-        // unguarded (ix+iz)%2 flips the checker's phase across the origin.
-        return ((ix + iz) % 2 + 2) % 2 == 0 ? rec.material.gridColor1 : rec.material.gridColor2;
+        if (!rec.material.texture) return rec.material.color;
+        return rec.material.texture->sample(rec.u, rec.v);
     }
 
     // Snell's law. 'd' and 'n' must be unit, 'n' facing against 'd', and eta is

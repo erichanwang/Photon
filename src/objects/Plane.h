@@ -24,11 +24,32 @@ public:
                 record.t = t;
                 record.point = ray.at(t);
                 record.normal = normal;
+                Vector3D uAxis, vAxis;
+                tangentBasis(normal, uAxis, vAxis);
+                Vector3D local = record.point - point;
+                record.u = local.dot(uAxis);
+                record.v = local.dot(vAxis);
                 record.material = material;
                 return true;
             }
         }
         return false;
+    }
+
+    // An infinite plane has no natural UV origin or axes, so pick any pair
+    // orthogonal to the normal and to each other. For the ground plane's
+    // normal (0,1,0) this must come out to exactly uAxis=(1,0,0),
+    // vAxis=(0,0,1) -- not just lined up with the world axes but sign-for-sign
+    // identical -- so that u,v equal x,z exactly and a checker texture floors
+    // them the same as the old world-space formula, including at exact grid
+    // boundaries. A basis that only matched up to a sign flip looked right on
+    // non-integer test points but silently flipped the checker's phase for
+    // any point sitting exactly on a grid line.
+    static void tangentBasis(const Vector3D& n, Vector3D& uAxis, Vector3D& vAxis) {
+        Vector3D unitN = n.normalize();
+        Vector3D helper = std::fabs(unitN.y) < 0.999 ? Vector3D(0, 1, 0) : Vector3D(0, 0, 1);
+        uAxis = unitN.cross(helper).normalize();
+        vAxis = uAxis.cross(unitN).normalize();
     }
 };
 
